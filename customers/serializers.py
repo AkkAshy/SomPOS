@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Customer
+from .models import Customer, CustomerDebt
 from django.utils.translation import gettext_lazy as _
 from drf_yasg.utils import swagger_serializer_method
 from drf_yasg import openapi
@@ -41,10 +41,10 @@ class CustomerSerializer(serializers.ModelSerializer):
                     'type': 'string',
                     'example': '+71234567890'
                 },
-                'debt': {
+                'total_spent':{
                     'type': 'number',
-                    'format': 'decimal',
-                    'example': 150.50
+                    'format': 'positive-integer',
+                    'example': 3
                 },
                 'created_at': {
                     'type': 'string',
@@ -56,9 +56,8 @@ class CustomerSerializer(serializers.ModelSerializer):
             'required': ['phone']
         }
 
+
     @swagger_serializer_method(serializer_or_field=serializers.CharField(help_text="Форматированное полное имя клиента"))
-    def get_full_name(self, obj):
-        return obj.full_name or _("Анонимный покупатель")
     def get_full_name(self, obj):
         return obj.full_name or _("Анонимный покупатель")
 
@@ -76,7 +75,34 @@ class CustomerSerializer(serializers.ModelSerializer):
             
         return value
 
-    def validate_debt(self, value):
-        if value < 0:
-            raise serializers.ValidationError(_("Задолженность не может быть отрицательной"))
-        return round(value, 2)
+
+
+class CustomerDebtSerializer(serializers.ModelSerializer):
+    customer = serializers.PrimaryKeyRelatedField(
+        queryset=Customer.objects.all(),
+        help_text="ID покупателя, которому принадлежит долг"
+    )
+    amount = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(0)],
+        help_text="Сумма долга"
+    )
+    
+    class Meta:
+        model = CustomerDebt
+        fields = ['id', 'customer', 'amount', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+        extra_kwargs = {
+            'customer': {
+                'help_text': "ID покупателя, которому принадлежит долг",
+                'required': True
+            },
+            'amount': {
+                'help_text': "Сумма долга",
+                'validators': [MinValueValidator(0)],
+                'required': True
+            }
+        }
+

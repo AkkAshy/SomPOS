@@ -2,8 +2,10 @@
 from django.db import models
 from django.core.validators import MinValueValidator
 from django.contrib.auth.models import User
-from inventory.models import Product, Stock
+from inventory.models import Product, Stock, UnitOfMeasure
+from decimal import Decimal
 import logging
+import json
 
 logger = logging.getLogger('sales')
 
@@ -54,30 +56,44 @@ class Transaction(models.Model):
         return f"Продажа #{self.id} от {self.created_at}"
 
     def process_sale(self):
-        """Обрабатывает продажу: списывает товары и обновляет долг, если нужно"""
         if self.status != 'pending':
             raise ValueError("Продажа уже обработана или отменена")
-
-        # Списываем товары со склада
         for item in self.items.all():
             stock = item.product.stock
-            stock.sell(item.quantity)  # Используем метод sell из Stock
-
-        # Обрабатываем долг, если способ оплаты — "в долг"
+            real_qty = item.quantity * item.unit.conversion_factor
+            stock.sell(real_qty)
         if self.payment_method == 'debt':
             if not self.customer:
                 raise ValueError("Для продажи в долг нужен покупатель")
             self.customer.add_debt(self.total_amount)
-
-        # Обновляем total_spent и loyalty_points
         if self.customer:
             self.customer.total_spent += self.total_amount
-            self.customer.loyalty_points += int(self.total_amount // 10)  # 1 балл за 10 рублей
+            self.customer.loyalty_points += int(self.total_amount // 10)
             self.customer.save(update_fields=['total_spent', 'loyalty_points'])
-
         self.status = 'completed'
         self.save(update_fields=['status'])
-        logger.info(f"Продажа #{self.id} завершена: {self.total_amount} ({self.payment_method})")
+        # Создаём запись в истории
+        TransactionHistory.objects.create(
+            transaction=self,
+            action='completed',
+            cashier=self.cashier,
+            details=json.dumps({
+                'total_amount': float(self.total_amount),
+                'payment_method': self.payment_method,
+                'items': [
+                    {
+                        'product': item.product.name,
+                        'quantity': float(item.quantity),
+                        'unit': item.unit.short_name,
+                        'price': float(item.price)
+                    } for item in self.items.all()
+                ]
+            })
+        )
+        logger.info(
+            f"Продажа #{self.id} завершена кассиром {self.cashier.username}: "
+            f"{self.total_amount} ({self.payment_method})"
+        )
 
 class TransactionItem(models.Model):
     transaction = models.ForeignKey(
@@ -90,8 +106,16 @@ class TransactionItem(models.Model):
         on_delete=models.PROTECT,
         related_name='sale_items'
     )
-    quantity = models.PositiveIntegerField(
-        validators=[MinValueValidator(1)]
+    quantity = models.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        validators=[MinValueValidator(Decimal('0.001'))]
+    )
+    unit = models.ForeignKey(
+        UnitOfMeasure,
+        on_delete=models.PROTECT,
+        related_name='transaction_items',
+        verbose_name="Единица измерения"
     )
     price = models.DecimalField(
         max_digits=10,
@@ -104,7 +128,7 @@ class TransactionItem(models.Model):
         verbose_name_plural = "Элементы продаж"
 
     def __str__(self):
-        return f"{self.product.name} × {self.quantity} в продаже #{self.transaction.id}"
+        return f"{self.product.name} × {self.quantity} {self.unit.short_name} в продаже #{self.transaction.id}"
 
 class TransactionHistory(models.Model):
     transaction = models.ForeignKey(
@@ -116,7 +140,14 @@ class TransactionHistory(models.Model):
         max_length=50,
         choices=[('created', 'Создана'), ('completed', 'Завершена'), ('refunded', 'Возвращена')]
     )
-    details = models.TextField()  # JSON или текст с информацией
+    cashier = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='transaction_history',
+        verbose_name="Кассир"
+    )
+    details = models.TextField()  # JSON с деталями
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -125,4 +156,5 @@ class TransactionHistory(models.Model):
         ordering = ['-created_at']
 
     def __str__(self):
-        return f"{self.action} для продажи #{self.transaction.id} от {self.created_at}"
+        cashier_name = self.cashier.username if self.cashier else 'Неизвестный'
+        return f"{self.action} для продажи #{self.transaction.id} (кассир: {cashier_name})"

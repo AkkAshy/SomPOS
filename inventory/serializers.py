@@ -1,12 +1,134 @@
 # inventory/serializers.py
 from rest_framework import serializers
-from .models import Product, ProductCategory, Stock, ProductBatch
+from .models import Product, ProductCategory, Stock, ProductBatch, UnitOfMeasure, MeasurementCategory
 from django.utils.translation import gettext_lazy as _
 from django.utils import timezone
 from drf_yasg.utils import swagger_serializer_method
 
 
+
+
+
+class MeasurementCategorySerializer(serializers.ModelSerializer):
+    """Сериализатор для категорий единиц измерения"""
+    units_count = serializers.SerializerMethodField(read_only=True)
+    
+    class Meta:
+        model = MeasurementCategory
+        fields = ['id', 'name', 'allow_fraction', 'base_unit_name', 'units_count']
+        
+    def get_units_count(self, obj):
+        """Количество единиц в категории"""
+        return obj.units.count()
+
+
+class MeasurementCategoryDetailSerializer(serializers.ModelSerializer):
+    """Детальный сериализатор для категорий с единицами измерения"""
+    units = serializers.SerializerMethodField()
+    units_count = serializers.SerializerMethodField(read_only=True)
+    
+    class Meta:
+        model = MeasurementCategory
+        fields = ['id', 'name', 'allow_fraction', 'base_unit_name', 'units_count', 'units']
+        
+    def get_units_count(self, obj):
+        """Количество единиц в категории"""
+        return obj.units.count()
+        
+    def get_units(self, obj):
+        """Список единиц измерения в категории"""
+        units = obj.units.filter(is_active=True).order_by('name')
+        return UnitOfMeasureSerializer(units, many=True).data
+
+
+class UnitOfMeasureSerializer(serializers.ModelSerializer):
+    """Сериализатор для единиц измерения"""
+    category_name = serializers.CharField(source='category.name', read_only=True)
+    
+    class Meta:
+        model = UnitOfMeasure
+        fields = [
+            'id', 'name', 'short_name', 'category', 'category_name',
+            'conversion_factor', 'is_active', 'created_at'
+        ]
+        read_only_fields = ['created_at']
+        
+    def validate_conversion_factor(self, value):
+        """Валидация коэффициента конвертации"""
+        if value <= 0:
+            raise serializers.ValidationError("Коэффициент конвертации должен быть больше 0")
+        return value
+        
+    def validate(self, data):
+        """Дополнительная валидация"""
+        # Проверяем, что short_name уникально в рамках категории
+        category = data.get('category')
+        short_name = data.get('short_name')
+        
+        if category and short_name:
+            existing = UnitOfMeasure.objects.filter(
+                category=category, 
+                short_name=short_name
+            ).exclude(pk=self.instance.pk if self.instance else None)
+            
+            if existing.exists():
+                raise serializers.ValidationError({
+                    'short_name': 'Единица с таким коротким названием уже существует в данной категории'
+                })
+        
+        return data
+
+
+class UnitOfMeasureDetailSerializer(serializers.ModelSerializer):
+    """Детальный сериализатор для единиц измерения"""
+    category = MeasurementCategorySerializer(read_only=True)
+    products_count = serializers.SerializerMethodField(read_only=True)
+    
+    class Meta:
+        model = UnitOfMeasure
+        fields = [
+            'id', 'name', 'short_name', 'category',
+            'conversion_factor', 'is_active', 'created_at', 'products_count'
+        ]
+        read_only_fields = ['created_at']
+        
+    def get_products_count(self, obj):
+        """Количество товаров использующих эту единицу"""
+        return obj.products.count()
+
+
+class UnitConversionSerializer(serializers.Serializer):
+    """Сериализатор для конвертации между единицами измерения"""
+    value = serializers.DecimalField(max_digits=10, decimal_places=6)
+    from_unit_id = serializers.IntegerField()
+    to_unit_id = serializers.IntegerField()
+    
+    def validate(self, data):
+        """Валидация данных для конвертации"""
+        try:
+            from_unit = UnitOfMeasure.objects.get(id=data['from_unit_id'])
+            to_unit = UnitOfMeasure.objects.get(id=data['to_unit_id'])
+        except UnitOfMeasure.DoesNotExist:
+            raise serializers.ValidationError("Одна из указанных единиц измерения не найдена")
+            
+        if from_unit.category != to_unit.category:
+            raise serializers.ValidationError("Единицы измерения должны быть из одной категории")
+            
+        data['from_unit'] = from_unit
+        data['to_unit'] = to_unit
+        return data
+
+
+class UnitConversionResultSerializer(serializers.Serializer):
+    """Сериализатор для результата конвертации"""
+    original_value = serializers.DecimalField(max_digits=10, decimal_places=6)
+    converted_value = serializers.DecimalField(max_digits=10, decimal_places=6)
+    from_unit = UnitOfMeasureSerializer()
+    to_unit = UnitOfMeasureSerializer()
+    conversion_formula = serializers.CharField()
+
 class ProductCategorySerializer(serializers.ModelSerializer):
+    
     class Meta:
         model = ProductCategory
         fields = ['id', 'name', 'created_at']
@@ -25,6 +147,9 @@ class ProductCategorySerializer(serializers.ModelSerializer):
 
 
 class ProductSerializer(serializers.ModelSerializer):
+
+    unit_detail = serializers.SerializerMethodField(read_only=True)
+
     category = serializers.PrimaryKeyRelatedField(
         queryset=ProductCategory.objects.all(),
         error_messages={
@@ -38,6 +163,11 @@ class ProductSerializer(serializers.ModelSerializer):
         read_only=True,
         help_text=_('Текущий остаток на складе')
     )
+    unit = serializers.PrimaryKeyRelatedField(
+        queryset=UnitOfMeasure.objects.filter(is_active=True),
+        write_only=True,
+        help_text="ID единицы измерения"
+    )
 
     @swagger_serializer_method(serializer_or_field=serializers.IntegerField)
     def get_current_stock(self, obj):
@@ -47,7 +177,7 @@ class ProductSerializer(serializers.ModelSerializer):
         model = Product
         fields = [
             'id', 'name', 'barcode', 'category',
-            'unit', 'sale_price', 'created_at', 'current_stock'
+            'unit', 'unit_detail', 'sale_price', 'created_at', 'current_stock'
         ]
         read_only_fields = ['created_at', 'current_stock']
         extra_kwargs = {
@@ -63,10 +193,15 @@ class ProductSerializer(serializers.ModelSerializer):
                 'name': 'Кока-Кола 0.5л',
                 'barcode': '5449000000996',
                 'category': 1,
-                'unit': 'piece',
+                'unit': 2,  # ID единицы измерения, например 2
                 'sale_price': 89.90
             }
         }
+
+    def get_unit_detail(self, obj):
+        if obj.unit:
+            return UnitOfMeasureSerializer(obj.unit).data
+        return None
 
     def validate_sale_price(self, value):
         if value < 0:

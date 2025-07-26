@@ -1,3 +1,4 @@
+# inventory/models.py
 import logging
 from django.db import models
 from django.core.validators import MinValueValidator
@@ -6,6 +7,37 @@ from django.dispatch import receiver
 from django.db.models import Sum, F
 
 logger = logging.getLogger('inventory')
+
+class MeasurementCategory(models.Model):
+    name = models.CharField(max_length=50, unique=True, verbose_name="Категория")  # Масса, Длина, Объем, Штука
+    allow_fraction = models.BooleanField(default=False, verbose_name="Разрешить дробные значения")  # Можно ли дробные значения
+    base_unit_name = models.CharField(max_length=20, verbose_name="Базовая единица")  # Например, кг, м, л
+
+    class Meta:
+        verbose_name = "Категория единиц измерения"
+        verbose_name_plural = "Категории единиц измерения"
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class UnitOfMeasure(models.Model):
+    name = models.CharField(max_length=50, unique=True, verbose_name="Единица измерения")
+    short_name = models.CharField(max_length=10, unique=True, verbose_name="Краткое название")
+    category = models.ForeignKey('inventory.MeasurementCategory', on_delete=models.PROTECT, related_name='units')
+    conversion_factor = models.DecimalField(max_digits=10, decimal_places=6, default=1.0, help_text="Коэффициент к базовой единице")
+
+    is_active = models.BooleanField(default=True, verbose_name="Активна или нет")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Дата создания")
+
+    class Meta:
+        verbose_name = "Единица измерения"
+        verbose_name_plural = "Единицы измерения"
+        ordering = ['name']
+
+    def __str__(self):
+        return f"{self.name} ({self.short_name})"
 
 class ProductCategory(models.Model):
     name = models.CharField(max_length=255, unique=True)
@@ -20,12 +52,6 @@ class ProductCategory(models.Model):
         return self.name
 
 class Product(models.Model):
-    UNIT_CHOICES = [
-        ('piece', 'Штука'), 
-        ('kg', 'Килограмм'), 
-        ('liter', 'Литр'),
-        ('pack', 'Упаковка')
-    ]
     
     name = models.CharField(max_length=255, db_index=True)
     barcode = models.CharField(
@@ -40,11 +66,13 @@ class Product(models.Model):
         on_delete=models.PROTECT,
         related_name='products'
     )
-    unit = models.CharField(
-        max_length=50, 
-        choices=UNIT_CHOICES, 
-        default='piece'
-    )
+    unit = models.ForeignKey(
+        'inventory.UnitOfMeasure',
+        on_delete=models.PROTECT,
+        related_name='products',
+        verbose_name="Единица измерения"
+        )
+    
     sale_price = models.DecimalField(
         max_digits=10, 
         decimal_places=2, 
@@ -165,3 +193,4 @@ def create_product_stock(sender, instance, created, **kwargs):
 @receiver(post_save, sender=ProductBatch)
 def update_stock_on_batch_change(sender, instance, **kwargs):
     instance.product.stock.update_quantity()
+

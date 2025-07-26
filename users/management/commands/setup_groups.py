@@ -2,18 +2,22 @@
 from django.core.management.base import BaseCommand
 from django.contrib.auth.models import Group, Permission
 
+
 class Command(BaseCommand):
     help = 'Создаёт группы и назначает разрешения'
 
     def handle(self, *args, **kwargs):
+        # Создаём группы
         admin_group, _ = Group.objects.get_or_create(name='admin')
         stockkeeper_group, _ = Group.objects.get_or_create(name='stockkeeper')
         manager_group, _ = Group.objects.get_or_create(name='manager')
         cashier_group, _ = Group.objects.get_or_create(name='cashier')
 
+        # Админ получает все разрешения
         admin_permissions = Permission.objects.all()
         admin_group.permissions.set(admin_permissions)
 
+        # Складчик
         stockkeeper_permissions = Permission.objects.filter(
             content_type__app_label='inventory',
             codename__in=[
@@ -25,6 +29,7 @@ class Command(BaseCommand):
         )
         stockkeeper_group.permissions.set(stockkeeper_permissions)
 
+        # Менеджер
         manager_permissions = Permission.objects.filter(
             content_type__app_label__in=['sales', 'customers'],
             codename__in=[
@@ -35,6 +40,7 @@ class Command(BaseCommand):
         )
         manager_group.permissions.set(manager_permissions)
 
+        # Кассир
         cashier_permissions = Permission.objects.filter(
             content_type__app_label='sales',
             codename__in=[

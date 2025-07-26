@@ -1,128 +1,176 @@
+# sales/serializers.py
+from decimal import Decimal
 from rest_framework import serializers
-from .models import Transaction, TransactionItem
-from inventory.models import Product
+from .models import Transaction, TransactionItem, TransactionHistory
+import json
+from django.contrib.auth.models import User
 from customers.models import Customer
+from customers.serializers import CustomerSerializer
+from inventory.models import Product, UnitOfMeasure
 from django.utils.translation import gettext_lazy as _
 import logging
 
 logger = logging.getLogger('sales')
 
-class TransactionItemSerializer(serializers.ModelSerializer):
-    product_id = serializers.PrimaryKeyRelatedField(
-        queryset=Product.objects.all(), source='product'
-    )
+class TransactionHistorySerializer(serializers.ModelSerializer):
+    cashier = serializers.SerializerMethodField()
+    details = serializers.SerializerMethodField()
 
     class Meta:
-        model = TransactionItem
-        fields = ['product_id', 'quantity', 'price']
+        model = TransactionHistory
+        fields = ['id', 'transaction', 'action', 'cashier', 'details', 'created_at']
+        read_only_fields = ['id', 'created_at']
 
+    def get_cashier(self, obj):
+        if obj.cashier:
+            return {
+                'id': obj.cashier.id,
+                'username': obj.cashier.username,
+                'full_name': obj.cashier.get_full_name() or obj.cashier.username
+            }
+        return None
+
+    def get_details(self, obj):
+        try:
+            return json.loads(obj.details)
+        except json.JSONDecodeError:
+            return {'error': 'Некорректный формат деталей'}
+
+
+class TransactionItemSerializer(serializers.Serializer):
+    product = serializers.PrimaryKeyRelatedField(
+        queryset=Product.objects.all(),
+        help_text="ID товара из каталога"
+    )
+    quantity = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        min_value=Decimal('0.001'),
+        help_text="Количество товара (можно дробное, если разрешено)"
+    )
+    unit_id = serializers.PrimaryKeyRelatedField(
+        queryset=UnitOfMeasure.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+        help_text="ID единицы измерения для продажи (опционально)"
+    )
+
+    def validate(self, data):
+        product = data['product']
+        quantity = data['quantity']
+        unit = data.get('unit_id', product.unit)
+
+        if unit.category != product.unit.category:
+            raise serializers.ValidationError(
+                _(f"Единица измерения {unit.name} не соответствует категории товара {product.unit.category.name}")
+            )
+
+        if quantity % 1 != 0 and not product.unit.category.allow_fraction:
+            raise serializers.ValidationError(
+                _(f"Для единицы {product.unit.short_name} нельзя использовать дробное количество")
+            )
+
+        real_qty = quantity * unit.conversion_factor
+        if product.stock.quantity < real_qty:
+            raise serializers.ValidationError(
+                _(f"Недостаточно товара {product.name}. Доступно: {product.stock.quantity} {product.unit.short_name}")
+            )
+
+        data['real_quantity'] = real_qty
+        data['used_unit'] = unit
+        return data
+# sales/serializers.py
 class TransactionSerializer(serializers.ModelSerializer):
     items = TransactionItemSerializer(many=True)
     customer_id = serializers.PrimaryKeyRelatedField(
-        queryset=Customer.objects.all(), required=False, allow_null=True
+        queryset=Customer.objects.all(),
+        required=False,
+        allow_null=True
     )
-    new_customer = serializers.DictField(
-        child=serializers.CharField(), required=False
-    )
+    cashier = serializers.SerializerMethodField(read_only=True)
+    history = TransactionHistorySerializer(many=True, read_only=True)
 
     class Meta:
         model = Transaction
-        fields = ['id', 'cashier', 'total_amount', 'payment_method', 'status', 
-                 'customer_id', 'new_customer', 'items', 'created_at']
-        read_only_fields = ['cashier', 'total_amount', 'created_at']
+        fields = ['id', 'items', 'customer_id', 'cashier', 'payment_method', 'total_amount', 'status', 'created_at', 'history']
+        read_only_fields = ['total_amount', 'status', 'created_at', 'cashier', 'history']
+
+    def get_cashier(self, obj):
+        if obj.cashier:
+            return {
+                'id': obj.cashier.id,
+                'username': obj.cashier.username,
+                'full_name': obj.cashier.get_full_name() or obj.cashier.username
+            }
+        return None
 
     def validate(self, data):
-        items = data.get('items', [])
-        customer_id = data.get('customer_id')
-        new_customer = data.get('new_customer')
-        payment_method = data.get('payment_method', 'cash')
-
-        if payment_method == 'debt' and not (customer_id or new_customer):
-            raise serializers.ValidationError(
-                {"error": _("Для оплаты в долг требуется customer_id или new_customer")}
-            )
-
-        if new_customer:
-            if not new_customer.get('full_name') or not new_customer.get('phone'):
-                raise serializers.ValidationError(
-                    {"new_customer": _("Поля full_name и phone обязательны")}
-                )
-
-        total_amount = 0
+        items = data['items']
         for item in items:
             product = item['product']
-            quantity = item['quantity']
-            if product.stock.quantity < quantity:
+            real_qty = item['real_quantity']
+            if product.stock.quantity < real_qty:
                 raise serializers.ValidationError(
-                    {"items": _(f"Недостаточно товара {product.name} на складе")}
+                    _(f"Недостаточно товара {product.name}. Доступно: {product.stock.quantity} {product.unit.short_name}")
                 )
-            total_amount += product.sale_price * quantity
-
-        data['total_amount'] = total_amount
+        data['total_amount'] = self._calculate_total(items)
         return data
 
+    def _calculate_total(self, items):
+        total = Decimal('0.00')
+        for item in items:
+            product = item['product']
+            qty = item['quantity']
+            total += (product.sale_price * qty * item['used_unit'].conversion_factor / product.unit.conversion_factor)
+        return round(total, 2)
+
     def create(self, validated_data):
-        """
-        Creates a new Transaction and its related TransactionItems.
-
-        Takes a validated dictionary with the following keys:
-            - items: a list of dictionaries with keys "product" and "quantity"
-            - customer_id: an int representing the Customer ID
-            - new_customer: a dictionary with keys "full_name" and "phone"
-            - cashier: a User object representing the cashier
-            - total_amount: a float representing the total amount
-            - payment_method: a string representing the payment method
-            - status: a string representing the status
-
-        Creates a new Transaction with the given parameters and its related
-        TransactionItems. If new_customer is given, it creates a new Customer
-        object and assigns it to the transaction. If customer_id is given, it
-        assigns the given Customer object to the transaction. Otherwise, it sets
-        the customer to None.
-
-        For each item in the items list, it creates a new TransactionItem with
-        the given product and quantity, and reduces the quantity of the product
-        in the stock.
-
-        Returns the created Transaction object.
-        """
         items_data = validated_data.pop('items')
-        customer_id = validated_data.pop('customer_id', None)
-        new_customer = validated_data.pop('new_customer', None)
         user = self.context['request'].user
 
-        if new_customer:
-            customer = Customer.objects.create(
-                full_name=new_customer['full_name'],
-                phone=new_customer['phone']
-            )
-        else:
-            customer = Customer.objects.get(id=customer_id) if customer_id else None
+        if not user.is_authenticated:
+            raise serializers.ValidationError(_("Требуется авторизация для создания продажи"))
+        if not user.groups.filter(name__in=['admin', 'manager', 'cashier']).exists():
+            raise serializers.ValidationError(_("У вас нет прав для создания продажи"))
 
-        transaction = Transaction.objects.create(
-            cashier=user,
-            customer=customer,
-            **validated_data
-        )
+        transaction = Transaction.objects.create(cashier=user, **validated_data)
 
-        for item_data in items_data:
-            product = item_data['product']
-            quantity = item_data['quantity']
+        for item in items_data:
+            product = item['product']
+            qty = item['quantity']
+            used_unit = item['used_unit']
+            real_qty = item['real_quantity']
+
             TransactionItem.objects.create(
                 transaction=transaction,
                 product=product,
-                quantity=quantity,
-                price=product.sale_price
+                quantity=qty,
+                unit=used_unit,
+                price=product.sale_price * used_unit.conversion_factor / product.unit.conversion_factor
             )
-            product.stock.sell(quantity)
-            logger.info(
-                f"Transaction item created by {user.username}. Transaction ID: {transaction.id}, "
-                f"Product ID: {product.id}, Quantity: {quantity}"
-            )
+            product.stock.sell(real_qty)
 
+        # Создаём запись в истории при создании транзакции
+        TransactionHistory.objects.create(
+            transaction=transaction,
+            action='created',
+            cashier=user,
+            details=json.dumps({
+                'total_amount': float(transaction.total_amount),
+                'payment_method': transaction.payment_method,
+                'items': [
+                    {
+                        'product': item.product.name,
+                        'quantity': float(item.quantity),
+                        'unit': item.unit.short_name,
+                        'price': float(item.price)
+                    } for item in transaction.items.all()
+                ]
+            })
+        )
         logger.info(
-            f"Transaction created by {user.username}. ID: {transaction.id}, Total: {transaction.total_amount}"
+            f"Продажа #{transaction.id} создана кассиром {user.username}: "
+            f"сумма {transaction.total_amount}, метод оплаты {transaction.payment_method}"
         )
         return transaction
     
-

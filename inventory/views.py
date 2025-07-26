@@ -1,18 +1,29 @@
+# inventory/views.py
 import logging
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
+from rest_framework.decorators import action
 from django.db.models import Q
 from django.db.models import F
+from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework import viewsets, filters
 from django.db import transaction
 from django.utils.translation import gettext_lazy as _
-from .models import Product, ProductCategory, Stock, ProductBatch
+from .models import Product, ProductCategory, Stock, ProductBatch, UnitOfMeasure, MeasurementCategory
 from .serializers import (
     ProductSerializer, 
     ProductCategorySerializer, 
     StockSerializer, 
     ProductBatchSerializer, 
-    SaleSerializer
+    SaleSerializer,
+    UnitOfMeasureSerializer,
+    MeasurementCategorySerializer, 
+    MeasurementCategoryDetailSerializer,
+    UnitOfMeasureSerializer, 
+    UnitOfMeasureDetailSerializer,
+    UnitConversionSerializer,
+    UnitConversionResultSerializer
 )
 
 from drf_yasg.utils import swagger_auto_schema
@@ -32,6 +43,92 @@ class BaseInventoryView(APIView):
                     exc_info=True)
         return super().handle_exception(exc)
 
+
+
+class MeasurementCategoryViewSet(viewsets.ModelViewSet):
+    queryset = MeasurementCategory.objects.prefetch_related('units').all()
+    permission_classes = [permissions.IsAuthenticated]
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['name']
+    ordering_fields = ['name', 'id']
+    ordering = ['name']
+
+    def get_serializer_class(self):
+        if self.action in ['retrieve']:
+            return MeasurementCategoryDetailSerializer
+        return MeasurementCategorySerializer
+
+    @swagger_auto_schema(
+        operation_summary="Список категорий единиц измерения",
+        responses={200: MeasurementCategorySerializer(many=True)}
+    )
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
+
+    @swagger_auto_schema(
+        operation_summary="Создать категорию единиц измерения",
+        request_body=MeasurementCategorySerializer,
+        responses={201: MeasurementCategorySerializer}
+    )
+    def create(self, request, *args, **kwargs):
+        return super().create(request, *args, **kwargs)
+
+
+class UnitOfMeasureViewSet(viewsets.ModelViewSet):
+    queryset = UnitOfMeasure.objects.select_related('category').all()
+    permission_classes = [permissions.IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['name', 'short_name']
+    ordering_fields = ['name', 'created_at']
+    filterset_fields = ['category', 'is_active']
+
+    def get_serializer_class(self):
+        if self.action in ['retrieve']:
+            return UnitOfMeasureDetailSerializer
+        return UnitOfMeasureSerializer
+
+    @swagger_auto_schema(
+        operation_summary="Список единиц измерения",
+        responses={200: UnitOfMeasureSerializer(many=True)}
+    )
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
+
+    @swagger_auto_schema(
+        operation_summary="Создать единицу измерения",
+        request_body=UnitOfMeasureSerializer,
+        responses={201: UnitOfMeasureSerializer}
+    )
+    def create(self, request, *args, **kwargs):
+        return super().create(request, *args, **kwargs)
+
+    @swagger_auto_schema(
+        method='post',
+        operation_summary="Конвертировать значение между единицами",
+        request_body=UnitConversionSerializer,
+        responses={200: UnitConversionResultSerializer}
+    )
+    @action(detail=False, methods=['post'], url_path='convert')
+    def convert_units(self, request):
+        """Конвертация между единицами измерения"""
+        serializer = UnitConversionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        from_unit = serializer.validated_data['from_unit']
+        to_unit = serializer.validated_data['to_unit']
+        value = serializer.validated_data['value']
+
+        # Формула: value * (to_factor / from_factor)
+        converted = value * (to_unit.conversion_factor / from_unit.conversion_factor)
+
+        result = {
+            'original_value': value,
+            'converted_value': round(converted, 6),
+            'from_unit': from_unit,
+            'to_unit': to_unit,
+            'conversion_formula': f"{value} * ({to_unit.conversion_factor} / {from_unit.conversion_factor})"
+        }
+        return Response(UnitConversionResultSerializer(result).data)
 
 class ProductCategoryCreateView(BaseInventoryView):
 
