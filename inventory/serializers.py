@@ -4,7 +4,7 @@ from django.utils.translation import gettext_lazy as _
 from django.utils import timezone
 from drf_yasg.utils import swagger_serializer_method
 
-from .models import (Product, ProductCategory, Stock, 
+from .models import (Product, ProductCategory, Stock,
                      ProductBatch, AttributeType,
                      AttributeValue, ProductAttribute,
                      SizeChart, SizeInfo
@@ -35,7 +35,7 @@ class AttributeValueSerializer(serializers.ModelSerializer):
 
 class AttributeTypeSerializer(serializers.ModelSerializer):
     values = AttributeValueSerializer(many=True, read_only=True)
-    
+
     class Meta:
         model = AttributeType
         fields = ['id', 'name', 'slug', 'is_filterable', 'values']
@@ -151,11 +151,11 @@ class ProductSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
         fields = [
-            'id', 
-            'name', 
-            'barcode', 
-            'category', 
-            'category_name', 
+            'id',
+            'name',
+            'barcode',
+            'category',
+            'category_name',
             'sale_price',
             'created_at',
             'size',
@@ -164,8 +164,9 @@ class ProductSerializer(serializers.ModelSerializer):
             'current_stock',
             'batches',
             'image_label',
+            'created_by'
         ]
-        read_only_fields = ['created_at', 'current_stock']
+        read_only_fields = ['created_at', 'current_stock', 'created_by']
         extra_kwargs = {
             'name': {'trim_whitespace': True},
             'barcode': {
@@ -182,23 +183,25 @@ class ProductSerializer(serializers.ModelSerializer):
             )
         return round(value, 2)
 
+
+
     def validate_barcode(self, value):
         if not value:
             return value
-            
+
         value = value.strip()
         if not value.isdigit():
             raise serializers.ValidationError(
                 _("Штрихкод должен содержать только цифры"),
                 code='invalid_barcode_format'
             )
-            
+
         if len(value) > 100:
             raise serializers.ValidationError(
                 _("Штрихкод не может быть длиннее 100 символов"),
                 code='barcode_too_long'
             )
-            
+
         if Product.objects.filter(barcode=value) \
            .exclude(pk=self.instance.pk if self.instance else None) \
            .exists():
@@ -206,17 +209,20 @@ class ProductSerializer(serializers.ModelSerializer):
                 _("Товар с таким штрихкодом уже существует"),
                 code='duplicate_barcode'
             )
-            
+
         return value
-    
+
     def create(self, validated_data):
-        size = validated_data.pop('size', None)  # size_id mapped to 'size' via source
-        product = super().create(validated_data)
+        size = validated_data.pop('size', None)
+        user = self.context['request'].user
+        product = Product.objects.create(created_by=user, **validated_data)
+        validated_data.pop('created_by', None)
         if size:
-            product.size = size  # Прямое присваивание для ForeignKey
+            product.size = size
             product.save()
         return product
-    
+
+
     def update(self, instance, validated_data):
         size = validated_data.pop('size', None)
         product = super().update(instance, validated_data)
@@ -231,13 +237,13 @@ class StockSerializer(serializers.ModelSerializer):
         source='product.name',
         read_only=True
     )
-    
+
     product_barcode = serializers.CharField(
         source='product.barcode',
         read_only=True,
         allow_null=True
     )
-    
+
 
     class Meta:
         model = Stock
@@ -252,7 +258,7 @@ class StockSerializer(serializers.ModelSerializer):
                 'quantity': 100
             }
         }
-        
+
     def validate_quantity(self, value):
         if value < 0:
             raise serializers.ValidationError(
@@ -345,23 +351,23 @@ class ProductMultiSizeCreateSerializer(serializers.Serializer):
 #     category = serializers.PrimaryKeyRelatedField(queryset=ProductCategory.objects.all())
 #     sale_price = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
 #     unit = serializers.ChoiceField(choices=Product.UNIT_CHOICES, default='piece')
-    
+
 #     # Список ID размеров, которые нужно создать
 #     size_ids = serializers.ListField(
 #         child=serializers.PrimaryKeyRelatedField(queryset=SizeInfo.objects.all()),
 #         allow_empty=False,
 #         help_text="Список ID размеров для создания отдельных товаров"
 #     )
-    
+
 #     # Информация о партии (опционально)
 #     batch_info = serializers.DictField(required=False, help_text="Информация о партии")
-    
+
 #     def validate_name(self, value):
 #         return value.strip()
-    
+
 #     def validate_sale_price(self, value):
 #         return round(value, 2)
-    
+
 #     def create(self, validated_data):
 #         """
 #         Создает отдельный Product для каждого выбранного размера
@@ -369,16 +375,16 @@ class ProductMultiSizeCreateSerializer(serializers.Serializer):
 #         size_ids = validated_data.pop('size_ids')
 #         batch_info = validated_data.pop('batch_info', None)
 #         base_name = validated_data['name']
-        
+
 #         created_products = []
-        
+
 #         for size in size_ids:
 #             # Создаем уникальное название с размером
 #             product_name = f"{base_name} - {size.size}"
-            
+
 #             # Генерируем уникальный штрих-код
 #             barcode = self._generate_unique_barcode()
-            
+
 #             # Создаем товар
 #             product_data = {
 #                 **validated_data,
@@ -386,38 +392,38 @@ class ProductMultiSizeCreateSerializer(serializers.Serializer):
 #                 'barcode': barcode,
 #                 'size': size
 #             }
-            
+
 #             product = Product.objects.create(**product_data)
-            
+
 #             # Создаем партию если указана
 #             if batch_info:
 #                 ProductBatch.objects.create(
 #                     product=product,
 #                     **batch_info
 #                 )
-            
+
 #             # Генерируем этикетку
 #             product.generate_label()
-            
+
 #             created_products.append(product)
-        
+
 #         return created_products
-    
+
 #     def _generate_unique_barcode(self):
 #         """
 #         Генерирует уникальный штрих-код
 #         """
 #         import random
 #         import time
-        
+
 #         while True:
 #             # Генерируем штрих-код из текущего времени и случайного числа
 #             timestamp = str(int(time.time()))[-8:]  # Последние 8 цифр времени
 #             random_part = str(random.randint(1000, 9999))  # 4 случайные цифры
 #             barcode = timestamp + random_part
-            
+
 #             # Проверяем уникальность
 #             if not Product.objects.filter(barcode=barcode).exists():
 #                 return barcode
-############################################################### Продукты конец #############################################################    
+############################################################### Продукты конец #############################################################
 

@@ -72,20 +72,44 @@ class TransactionHistoryListView(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(created_at__date__lte=date_to)
 
         if product:
-            queryset = queryset.filter(details__icontains=product)
+            queryset = queryset.filter(details__icontains=f'"product": "{product}"')
         if customer:
-            queryset = queryset.filter(details__icontains=customer)
+            queryset = queryset.filter(details__icontains=f'"customer": "{customer}"')
         if cashier:
-            queryset = queryset.filter(details__icontains=cashier)
+            # Если в JSON используется формат {"cashier": "ID" или "ФИО"}, это важно:
+            queryset = queryset.filter(details__icontains=f'"cashier": "{cashier}"')
 
         return queryset
 
 from django.db.models import IntegerField, DecimalField, ExpressionWrapper
 from django.db.models.functions import Coalesce
+
+from django.utils.dateparse import parse_date
+from django.db.models import Q
+
 class CashierSalesSummaryView(APIView):
     pagination_class = pagination.PageNumberPagination
+
     def get(self, request):
-        queryset = TransactionItem.objects.values(
+        cashier_id = request.query_params.get('cashier_id')
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+
+        # Базовый queryset
+        queryset = TransactionItem.objects.all()
+
+        # Фильтрация по кассиру
+        if cashier_id:
+            queryset = queryset.filter(transaction__cashier_id=cashier_id)
+
+        # Фильтрация по дате
+        if start_date:
+            queryset = queryset.filter(transaction__created_at__date__gte=parse_date(start_date))
+        if end_date:
+            queryset = queryset.filter(transaction__created_at__date__lte=parse_date(end_date))
+
+        # Агрегация
+        queryset = queryset.values(
             'transaction__cashier_id',
             'transaction__cashier__username'
         ).annotate(
@@ -114,4 +138,5 @@ class CashierSalesSummaryView(APIView):
 
         serializer = CashierAggregateSerializer(data, many=True)
         return Response(serializer.data)
-    
+
+

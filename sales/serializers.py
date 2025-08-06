@@ -24,7 +24,7 @@ class TransactionItemSerializer(serializers.ModelSerializer):
 
 class TransactionSerializer(serializers.ModelSerializer):
     items = TransactionItemSerializer(many=True)
-    customer_id = serializers.PrimaryKeyRelatedField(
+    customer = serializers.PrimaryKeyRelatedField(
         queryset=Customer.objects.all(), required=False, allow_null=True
     )
     new_customer = serializers.DictField(
@@ -33,17 +33,17 @@ class TransactionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Transaction
-        fields = ['id', 'cashier', 'total_amount', 'payment_method', 'status', 
-                 'customer_id', 'new_customer', 'items', 'created_at']
+        fields = ['id', 'cashier', 'total_amount', 'payment_method', 'status',
+                 'customer', 'new_customer', 'items', 'created_at']
         read_only_fields = ['cashier', 'total_amount', 'created_at']
 
     def validate(self, data):
         items = data.get('items', [])
-        customer_id = data.get('customer_id')
+        customer = data.get('customer')
         new_customer = data.get('new_customer')
         payment_method = data.get('payment_method', 'cash')
 
-        if payment_method == 'debt' and not (customer_id or new_customer):
+        if payment_method == 'debt' and not (customer or new_customer):
             raise serializers.ValidationError(
                 {"error": _("Для оплаты в долг требуется customer_id или new_customer")}
             )
@@ -69,7 +69,7 @@ class TransactionSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         items_data = validated_data.pop('items')
-        customer_id = validated_data.pop('customer_id', None)
+        customer = validated_data.pop('customer', None)
         new_customer = validated_data.pop('new_customer', None)
         user = self.context['request'].user
 
@@ -79,9 +79,7 @@ class TransactionSerializer(serializers.ModelSerializer):
                 phone=phone,
                 defaults={'full_name': new_customer['full_name']}
             )
-        else:
-            customer = Customer.objects.get(id=customer_id) if customer_id else None
-
+        # ✅ customer уже объект, повторно его не ищем
         transaction = Transaction.objects.create(
             cashier=user,
             customer=customer,
@@ -97,7 +95,6 @@ class TransactionSerializer(serializers.ModelSerializer):
                 quantity=quantity,
                 price=product.sale_price
             )
-            # Удаляем product.stock.sell(quantity), так как это делается в process_sale
             logger.info(
                 f"Transaction item created by {user.username}. Transaction ID: {transaction.id}, "
                 f"Product ID: {product.id}, Quantity: {quantity}"
@@ -109,7 +106,7 @@ class TransactionSerializer(serializers.ModelSerializer):
             f"Transaction created by {user.username}. ID: {transaction.id}, Total: {transaction.total_amount}"
         )
         return transaction
-    
+
 class TransactionHistorySerializer(serializers.ModelSerializer):
     parsed_details = serializers.SerializerMethodField()
 
@@ -122,7 +119,7 @@ class TransactionHistorySerializer(serializers.ModelSerializer):
             return json.loads(obj.details)
         except json.JSONDecodeError:
             return {}
-        
+
 class CashierAggregateSerializer(serializers.Serializer):
     cashier_id = serializers.IntegerField()
     cashier_name = serializers.CharField()

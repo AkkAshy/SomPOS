@@ -5,6 +5,8 @@ from inventory.models import Product, ProductCategory
 from sales.models import Transaction
 from customers.models import Customer
 import logging
+from django.contrib.auth.models import User
+
 
 logger = logging.getLogger('analytics')
 
@@ -14,6 +16,14 @@ class SalesSummary(models.Model):
     Храним данные по дням, чтобы снизить нагрузку на запросы.
     """
     date = models.DateField(verbose_name=_("Дата"))
+    cashier = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        verbose_name="Кассир",
+        related_name="sales_summaries"
+    )
     total_amount = models.DecimalField(
         max_digits=12, decimal_places=2, default=0.00,
         verbose_name=_("Общая сумма продаж")
@@ -47,6 +57,13 @@ class ProductAnalytics(models.Model):
         Product, on_delete=models.CASCADE, related_name='analytics',
         verbose_name=_("Товар")
     )
+    cashier = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="product_analytics"
+    )
     date = models.DateField(verbose_name=_("Дата"))
     quantity_sold = models.PositiveIntegerField(
         default=0, verbose_name=_("Продано единиц")
@@ -73,6 +90,13 @@ class CustomerAnalytics(models.Model):
     customer = models.ForeignKey(
         Customer, on_delete=models.CASCADE, related_name='analytics',
         verbose_name=_("Клиент")
+    )
+    cashier = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="customer_analytics"
     )
     date = models.DateField(verbose_name=_("Дата"))
     total_purchases = models.DecimalField(

@@ -16,7 +16,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
 
 class UserSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=True)
-    employee = EmployeeSerializer(read_only=True)
+    employee = EmployeeSerializer(required=False)  # ✅ изменено
     groups = serializers.SlugRelatedField(
         many=True,
         slug_field='name',
@@ -35,35 +35,15 @@ class UserSerializer(serializers.ModelSerializer):
         employee_data = validated_data.pop('employee', None)
         groups = validated_data.pop('groups')
         password = validated_data.pop('password')
+
         user = User.objects.create_user(password=password, **validated_data)
         user.groups.set([Group.objects.get(name=name) for name in groups])
+
         if employee_data:
             Employee.objects.create(user=user, **employee_data)
+
         return user
 
-    def update(self, instance, validated_data):
-        employee_data = validated_data.pop('employee', None)
-        groups = validated_data.pop('groups', None)
-
-        instance.username = validated_data.get('username', instance.username)
-        instance.email = validated_data.get('email', instance.email)
-        instance.first_name = validated_data.get('first_name', instance.first_name)
-        instance.last_name = validated_data.get('last_name', instance.last_name)
-        if 'password' in validated_data:
-            instance.set_password(validated_data['password'])
-        instance.save()
-
-        if groups:
-            instance.groups.set([Group.objects.get(name=name) for name in groups])
-
-        if employee_data and hasattr(instance, 'employee'):
-            employee = instance.employee
-            employee.role = employee_data.get('role', employee.role)
-            employee.phone = employee_data.get('phone', employee.phone)
-            employee.photo = employee_data.get('photo', employee.photo)
-            employee.save()
-
-        return instance
 
 class LoginSerializer(serializers.Serializer):
     username = serializers.CharField(required=True)
