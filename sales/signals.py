@@ -2,6 +2,7 @@
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from .models import Transaction, TransactionHistory
+from customers.models import Customer
 import json
 
 @receiver(post_save, sender=Transaction)
@@ -22,3 +23,13 @@ def log_transaction(sender, instance, created, **kwargs):
         action=action,
         details=json.dumps(details, ensure_ascii=False)
     )
+
+
+@receiver(post_save, sender=Transaction)
+def update_customer_last_purchase(sender, instance, **kwargs):  # ← ✅ другое имя
+    customer = instance.customer
+    if customer and instance.status == 'completed':  # ← Можно добавить проверку статуса
+        if not customer.last_purchase_date or instance.created_at > customer.last_purchase_date:
+            customer.last_purchase_date = instance.created_at
+            customer.save(update_fields=['last_purchase_date'])
+

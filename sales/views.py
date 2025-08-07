@@ -54,32 +54,46 @@ class TransactionHistoryListView(viewsets.ReadOnlyModelViewSet):
     pagination_class = pagination.PageNumberPagination
     queryset = TransactionHistory.objects.all()
     serializer_class = TransactionHistorySerializer
+    lookup_field = 'id'
     filter_backends = [DjangoFilterBackend, OrderingFilter]
     ordering_fields = ['created_at']
     permission_classes = [IsAuthenticated]
+    filterset_fields = ['transaction']
 
     def get_queryset(self):
         queryset = super().get_queryset()
-        product = self.request.query_params.get('product')
-        customer = self.request.query_params.get('customer')
-        cashier = self.request.query_params.get('cashier')
+
+        transaction_id = self.request.query_params.get('transaction')
+        product_id = self.request.query_params.get('product')
+        customer_id = self.request.query_params.get('customer')
+        cashier_id = self.request.query_params.get('cashier')
         date_from = self.request.query_params.get('date_from')
         date_to = self.request.query_params.get('date_to')
+
+        if transaction_id:
+            queryset = queryset.filter(transaction__id=transaction_id)
+
+        if customer_id:
+            queryset = queryset.filter(transaction__customer__id=customer_id)
+
+        if cashier_id:
+            queryset = queryset.filter(transaction__cashier__id=cashier_id)
+
+        if product_id:
+            try:
+                product_id = int(product_id)
+                queryset = queryset.filter(transaction__items__product__id=product_id).distinct()
+            except ValueError:
+                queryset = queryset.none()  # Защита от неправильного id
 
         if date_from:
             queryset = queryset.filter(created_at__date__gte=date_from)
         if date_to:
             queryset = queryset.filter(created_at__date__lte=date_to)
 
-        if product:
-            queryset = queryset.filter(details__icontains=f'"product": "{product}"')
-        if customer:
-            queryset = queryset.filter(details__icontains=f'"customer": "{customer}"')
-        if cashier:
-            # Если в JSON используется формат {"cashier": "ID" или "ФИО"}, это важно:
-            queryset = queryset.filter(details__icontains=f'"cashier": "{cashier}"')
-
         return queryset
+
+
 
 from django.db.models import IntegerField, DecimalField, ExpressionWrapper
 from django.db.models.functions import Coalesce

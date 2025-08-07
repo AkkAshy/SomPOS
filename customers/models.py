@@ -11,6 +11,11 @@ class Customer(models.Model):
     debt = models.DecimalField(max_digits=10, decimal_places=2, default=0, validators=[MinValueValidator(0)], verbose_name="Долг")
     loyalty_points = models.PositiveIntegerField(default=0, verbose_name="Бонусные баллы")
     created_at = models.DateTimeField(auto_now_add=True)
+    last_purchase_date = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Дата последней покупки"
+    )
 
     class Meta:
         verbose_name = "Покупатель"
@@ -23,15 +28,15 @@ class Customer(models.Model):
         self.debt += amount
         self.save(update_fields=['debt'])
 
-    @property
-    def last_purchase_date(self):
-        """Возвращает дату последней завершённой покупки"""
-        last_transaction = self.purchases.filter(
-            status='completed'
-        ).aggregate(
-            last_date=Max('created_at')
-        )
-        return last_transaction['last_date']
+    # @property
+    # def last_purchase_date(self):
+    #     """Возвращает дату последней завершённой покупки"""
+    #     last_transaction = self.purchases.filter(
+    #         status='completed'
+    #     ).aggregate(
+    #         last_date=Max('created_at')
+    #     )
+    #     return last_transaction['last_date']
 
     @property
     def purchase_count(self):

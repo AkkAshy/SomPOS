@@ -213,10 +213,11 @@ class ProductSerializer(serializers.ModelSerializer):
         return value
 
     def create(self, validated_data):
+        validated_data.pop('created_by', None)
         size = validated_data.pop('size', None)
         user = self.context['request'].user
         product = Product.objects.create(created_by=user, **validated_data)
-        validated_data.pop('created_by', None)
+
         if size:
             product.size = size
             product.save()
