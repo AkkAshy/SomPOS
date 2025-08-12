@@ -10,6 +10,9 @@ from .serializers import LoginSerializer, UserSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
 import logging
 from django.contrib.auth import get_user_model
+from django.shortcuts import get_object_or_404
+from django.db.models import Q, Value
+from django.db.models.functions import Concat
 
 User = get_user_model()
 
@@ -197,7 +200,7 @@ class ProfileUpdateView(APIView):
             serializer.save()
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
+
 
 
 class ProfileView(APIView):
@@ -239,39 +242,44 @@ class ProfileView(APIView):
         return Response(serializer.data)
 
 
-
 class UserListView(APIView):
     permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
 
     @swagger_auto_schema(
-        operation_summary="Список пользователей",
+        operation_summary="Список пользователей с фильтрацией по имени и фамилии (поиск по name)",
+        manual_parameters=[
+            openapi.Parameter('name', openapi.IN_QUERY, description="Поиск по имени, фамилии или полному имени", type=openapi.TYPE_STRING),
+        ],
         responses={200: UserSerializer(many=True)},
         tags=['User List']
     )
-    def get(self, request):
-        """
-        Получение списка всех пользователей
+    def get(self, request, pk=None):
+        search_name = request.query_params.get('name')
 
-        GET /api/users/
-
-        Response:
-            200: [
-                {
-                    "id": integer,
-                    "username": "string",
-                    "email": "string",
-                    "first_name": "string",
-                    "last_name": "string",
-                    "groups": ["string"],
-                    "employee": {
-                        "role": "string",
-                        "phone": "string",
-                        "photo": "string"
-                    }
-                }
-            ]
-        """
         users = User.objects.all()
+
+        if search_name:
+            # Добавляем аннотированное поле full_name
+            users = users.annotate(
+                full_name=Concat('first_name', Value(' '), 'last_name')
+            ).filter(
+                Q(first_name__icontains=search_name) |
+                Q(last_name__icontains=search_name) |
+                Q(full_name__icontains=search_name)
+            )
+
         serializer = UserSerializer(users, many=True)
         return Response(serializer.data)
-    
+
+class UserDetailView(APIView):
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+
+    @swagger_auto_schema(
+        operation_summary="Детальный вид пользователя по ID",
+        responses={200: UserSerializer()},
+        tags=['User Detail']
+    )
+    def get(self, request, pk):
+        user = get_object_or_404(User, pk=pk)
+        serializer = UserSerializer(user)
+        return Response(serializer.data)

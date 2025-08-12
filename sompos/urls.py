@@ -58,5 +58,6 @@ urlpatterns = [
     path('redoc/',
          schema_view.with_ui('redoc', cache_timeout=0),
          name='schema-redoc'),
+    path('sms/', include('sms_sender.urls')),
 
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

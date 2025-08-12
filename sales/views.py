@@ -10,7 +10,7 @@ from drf_yasg.utils import swagger_auto_schema
 from django.db.models.functions import Coalesce
 from drf_yasg import openapi
 from .models import Transaction, TransactionHistory, TransactionItem
-from .serializers import TransactionSerializer, TransactionHistorySerializer, TransactionItemSerializer, CashierAggregateSerializer
+from .serializers import TransactionSerializer, FilteredTransactionHistorySerializer, TransactionItemSerializer, CashierAggregateSerializer
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import OrderingFilter
 from rest_framework import generics
@@ -50,20 +50,28 @@ class TransactionViewSet(viewsets.ModelViewSet):
         serializer.save()
 
 
+
+
 class TransactionHistoryListView(viewsets.ReadOnlyModelViewSet):
     pagination_class = pagination.PageNumberPagination
-    queryset = TransactionHistory.objects.all()
-    serializer_class = TransactionHistorySerializer
     lookup_field = 'id'
     filter_backends = [DjangoFilterBackend, OrderingFilter]
     ordering_fields = ['created_at']
+    ordering = ['-created_at']
     permission_classes = [IsAuthenticated]
     filterset_fields = ['transaction']
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        # Фильтруем только нужные действия
+        queryset = TransactionHistory.objects.filter(
+            action__in=['completed', 'refunded']
+        ).exclude(
+            Q(details__isnull=True) | Q(details='') | Q(details='{}')
+        )
 
-        transaction_id = self.request.query_params.get('transaction')
+
+        # Дополнительные фильтры
+        transaction_id = self.request.query_params.get('transaction_id')
         product_id = self.request.query_params.get('product')
         customer_id = self.request.query_params.get('customer')
         cashier_id = self.request.query_params.get('cashier')
@@ -84,7 +92,7 @@ class TransactionHistoryListView(viewsets.ReadOnlyModelViewSet):
                 product_id = int(product_id)
                 queryset = queryset.filter(transaction__items__product__id=product_id).distinct()
             except ValueError:
-                queryset = queryset.none()  # Защита от неправильного id
+                queryset = queryset.none()
 
         if date_from:
             queryset = queryset.filter(created_at__date__gte=date_from)
@@ -92,6 +100,27 @@ class TransactionHistoryListView(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(created_at__date__lte=date_to)
 
         return queryset
+
+    def get_serializer_class(self):
+        # Используем фильтрующий сериализатор
+        return FilteredTransactionHistorySerializer
+
+    def list(self, request, *args, **kwargs):
+        """
+        Переопределяем list для удаления None значений
+        """
+        queryset = self.filter_queryset(self.get_queryset())
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            # Фильтруем None значения (записи с неполными данными)
+            valid_data = [item for item in serializer.data if item is not None]
+            return self.get_paginated_response(valid_data)
+
+        serializer = self.get_serializer(queryset, many=True)
+        valid_data = [item for item in serializer.data if item is not None]
+        return Response(valid_data)
 
 
 

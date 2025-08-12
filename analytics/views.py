@@ -11,6 +11,13 @@ from .serializers import SalesSummarySerializer, ProductAnalyticsSerializer, Cus
 from django.utils.translation import gettext_lazy as _
 from django.db.models import Sum
 from datetime import datetime, timedelta
+from rest_framework.views import APIView
+from django.db.models import Sum
+from datetime import datetime
+
+from sales.serializers import FilteredTransactionHistorySerializer
+from sales.models import Transaction, TransactionHistory
+from .funcs import get_date_range
 
 
 class AnalyticsPermission(permissions.BasePermission):
@@ -47,13 +54,24 @@ class SalesAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
         if end_date:
             queryset = queryset.filter(date__lte=end_date)
 
+        # Группировка по методу оплаты
+        payment_summary = (
+            queryset.values('payment_method')
+            .annotate(
+                total_amount=Sum('total_amount'),
+                total_transactions=Sum('total_transactions'),
+                total_items_sold=Sum('total_items_sold')
+            )
+            .order_by('payment_method')
+        )
+
+        # Общие суммы
         total_amount = queryset.aggregate(total=Sum('total_amount'))['total'] or 0
         total_transactions = queryset.aggregate(total=Sum('total_transactions'))['total'] or 0
         total_items_sold = queryset.aggregate(total=Sum('total_items_sold'))['total'] or 0
 
-        serializer = self.get_serializer(queryset, many=True)
         return Response({
-            'summaries': serializer.data,
+            'payment_summary': payment_summary,  # сгруппировано по методу оплаты
             'total_amount': total_amount,
             'total_transactions': total_transactions,
             'total_items_sold': total_items_sold
@@ -143,3 +161,32 @@ class CustomerAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
             'top_customers': top_customers,
             'limit': limit
         })
+
+
+class TransactionsHistoryByDayView(APIView):
+    def get(self, request):
+        date_from = request.GET.get("date_from")
+        date_to = request.GET.get("date_to")
+
+        if not date_from or not date_to:
+            return Response({"error": "Uncorrect datas"})
+
+        try:
+            dates = get_date_range(date_from, date_to)
+            trasnactions_list = []
+            for date in dates:
+                trasnactions = TransactionHistory.objects.filter(created_at__date=date).all()
+                trasnactions = FilteredTransactionHistorySerializer(trasnactions, many=True).data
+                if trasnactions:
+                    amounts = 0
+                    for transaction in trasnactions:
+                        try:
+                            amount = float(transaction["parsed_details"]["total_amount"])
+                        except:
+                            amount = 0
+                        amounts += amount
+                    trasnactions_list.append({date: amounts})
+
+            return Response(trasnactions_list)
+        except Exception as e:
+            return Response({"error": str(e)})

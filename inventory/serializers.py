@@ -213,14 +213,25 @@ class ProductSerializer(serializers.ModelSerializer):
         return value
 
     def create(self, validated_data):
-        validated_data.pop('created_by', None)
-        size = validated_data.pop('size', None)
+        """
+        Создание товара с правильной обработкой размера
+        """
+        validated_data.pop('created_by', None)  # Убираем created_by из validated_data
+        size = validated_data.pop('size', None)  # Извлекаем размер
+
         user = self.context['request'].user
+
+        # Создаем товар БЕЗ размера
         product = Product.objects.create(created_by=user, **validated_data)
 
+        # Устанавливаем размер ПОСЛЕ создания
         if size:
             product.size = size
             product.save()
+            print(f"DEBUG: Размер {size} установлен для товара {product.name}")  # Отладка
+        else:
+            print(f"DEBUG: Размер не передан для товара {product.name}")  # Отладка
+
         return product
 
 
@@ -272,77 +283,69 @@ class StockSerializer(serializers.ModelSerializer):
 class ProductMultiSizeCreateSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=255)
     category = serializers.PrimaryKeyRelatedField(queryset=ProductCategory.objects.all())
-    sale_price = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
-    unit = serializers.ChoiceField(choices=Product.UNIT_CHOICES, default='piece')
-
-    # Список партий, каждая с уникальным размером
-    batch_info = serializers.ListField(
-        child=serializers.DictField(),
-        allow_empty=False,
-        help_text="Список партий с размером и количеством"
+    sale_price = serializers.DecimalField(max_digits=12, decimal_places=2)
+    unit = serializers.CharField(max_length=50)
+    size_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        allow_empty=False
     )
+    batch_info = serializers.DictField(required=False)
 
-    def validate_name(self, value):
-        return value.strip()
+    def save(self, **kwargs):
+        """
+        Создает товары для каждого размера
+        """
+        created_by = kwargs.get('created_by')  # Получаем пользователя
+        if not created_by:
+            raise serializers.ValidationError("created_by is required")
 
-    def validate_sale_price(self, value):
-        return round(value, 2)
+        validated_data = self.validated_data
+        size_ids = validated_data.pop('size_ids')
+        batch_info = validated_data.pop('batch_info', None)
 
-    def validate(self, data):
-        seen_sizes = set()
-        for item in data['batch_info']:
-            size_id = item.get('size_id')
-            if not size_id:
-                raise serializers.ValidationError("Каждая партия должна содержать size_id.")
-            if size_id in seen_sizes:
-                raise serializers.ValidationError(f"Размер с ID {size_id} указан дважды.")
-            seen_sizes.add(size_id)
-        return data
-
-    def create(self, validated_data):
-        batch_info = validated_data.pop('batch_info')
-        base_name = validated_data.pop('name')
         created_products = []
 
-        for info in batch_info:
-            size = SizeInfo.objects.get(pk=info['size_id'])
-            quantity = info['quantity']
-            purchase_price = info.get('purchase_price')
-            supplier = info.get('supplier')
-            expiration_date = info.get('expiration_date')
+        for size_id in size_ids:
+            try:
+                size_instance = SizeInfo.objects.get(id=size_id)
 
-            barcode = self._generate_unique_barcode()
 
-            product = Product.objects.create(
-                name=base_name,
-                barcode=barcode,
-                size=size,
-                **validated_data
-            )
+                # Генерируем уникальное имя и штрих-код
+                product_name = f"{validated_data['name']} - {size_instance.size}"
+                unique_barcode = self.generate_unique_barcode()
 
-            ProductBatch.objects.create(
-                product=product,
-                quantity=quantity,
-                purchase_price=purchase_price,
-                supplier=supplier,
-                expiration_date=expiration_date
-            )
+                # Создаем товар
+                product_data = {
+                    **validated_data,
+                    'name': product_name,
+                    'barcode': unique_barcode,
+                    'created_by': created_by,  # ✅ Устанавливаем created_by
+                    'size': size_instance
+                }
 
-            product.generate_label()
-            created_products.append(product)
+                product = Product.objects.create(**product_data)
+
+                # Создаем партию если указана
+                if batch_info:
+                    ProductBatch.objects.create(
+                        product=product,
+                        **batch_info
+                    )
+
+                # Генерируем лейбл
+                product.generate_label()
+
+                created_products.append(product)
+
+            except SizeInfo.DoesNotExist:
+                raise serializers.ValidationError(f"Size with id {size_id} does not exist")
 
         return created_products
 
-    def _generate_unique_barcode(self):
-        import random
-        import time
-
-        while True:
-            timestamp = str(int(time.time()))[-8:]
-            random_part = str(random.randint(1000, 9999))
-            barcode = timestamp + random_part
-            if not Product.objects.filter(barcode=barcode).exists():
-                return barcode
+    def generate_unique_barcode(self):
+        """Генерирует уникальный штрих-код"""
+        import uuid
+        return str(uuid.uuid4().int)[:12]
 
 # class ProductMultiSizeCreateSerializer(serializers.Serializer):
 #     """

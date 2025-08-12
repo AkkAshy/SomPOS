@@ -266,7 +266,7 @@ class Product(models.Model):
             barcode_img = PILImage.open(barcode_buffer)
 
             # Масштабируем штрих-код до нужного размера
-            barcode_img = barcode_img.resize((120, 80), PILImage.Resampling.LANCZOS)
+            barcode_img = barcode_img.resize((120, 100), PILImage.Resampling.LANCZOS)
             return barcode_img
 
         except Exception as e:
@@ -277,7 +277,7 @@ class Product(models.Model):
         """Создает этикетку в памяти с улучшенной компоновкой"""
         try:
             # 1. Создаем холст (увеличиваем высоту для всех элементов)
-            label_width, label_height = 500, 400
+            label_width, label_height = 120, 100
             label_img = PILImage.new("RGB", (label_width, label_height), "white")
             draw = ImageDraw.Draw(label_img)
 
@@ -314,14 +314,14 @@ class Product(models.Model):
             # 4. Добавляем информацию о товаре
             info_lines = []
 
-            # Цена
-            if self.sale_price:
-                info_lines.append(f"Цена: {self.sale_price:.2f} UZS")
+            # # Цена
+            # if self.sale_price:
+            #     info_lines.append(f"Цена: {self.sale_price:.2f} UZS")
 
 
-            # Размер
-            if self.size:
-                info_lines.append(f"Размер: {self.size}")
+            # # Размер
+            # if self.size:
+            #     info_lines.append(f"Размер: {self.size}")
 
             # # Единица измерения
             # info_lines.append(f"Единица: {self.get_unit_display()}")
@@ -331,12 +331,12 @@ class Product(models.Model):
             #     info_lines.append(f"Категория: {self.category.name}")
 
             # Отображаем информацию
-            for line in info_lines:
-                bbox = draw.textbbox((0, 0), line, font=info_font)
-                text_width = bbox[2] - bbox[0]
-                x_center = (label_width - text_width) // 2
-                draw.text((x_center, y_offset), line, fill="black", font=info_font)
-                y_offset += 25
+            # for line in info_lines:
+            #     bbox = draw.textbbox((0, 0), line, font=info_font)
+            #     text_width = bbox[2] - bbox[0]
+            #     x_center = (label_width - text_width) // 2
+            #     draw.text((x_center, y_offset), line, fill="black", font=info_font)
+            #     y_offset += 25
 
 
 
@@ -464,6 +464,13 @@ class ProductBatch(models.Model):
         null=True,
         blank=True,
         verbose_name="Цена закупки",
+    )
+    size = models.ForeignKey(
+        SizeInfo,  # или как у тебя называется модель размера
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        verbose_name="Размер"
     )
     supplier = models.CharField(max_length=255, blank=True, null=True,  verbose_name="Поставщик")
     expiration_date = models.DateField(null=True, blank=True, verbose_name="Дата истечения")

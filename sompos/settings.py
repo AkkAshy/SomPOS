@@ -72,6 +72,7 @@ INSTALLED_APPS = [
     'users',
     'corsheaders',
     'django_filters',
+    'sms_sender',
 ]
 
 MIDDLEWARE = [

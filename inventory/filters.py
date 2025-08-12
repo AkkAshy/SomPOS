@@ -11,58 +11,70 @@ class ProductFilter(django_filters.FilterSet):
     name = django_filters.CharFilter(lookup_expr='icontains', label='Название содержит')
     barcode = django_filters.CharFilter(lookup_expr='exact', label='Точный штрих-код')
     category = django_filters.NumberFilter(field_name='category', label='Категория')
-    
-    # Фильтрация по атрибутам
+
+    # --- фильтры по создателю ---
+    created_by = django_filters.NumberFilter(
+        field_name='created_by__id',
+        lookup_expr='exact',
+        label='ID создателя'
+    )
+    created_by_username = django_filters.CharFilter(
+        field_name='created_by__username',
+        lookup_expr='iexact',
+        label='Имя создателя'
+    )
+
+    # --- фильтрация по атрибутам ---
     brand = django_filters.ModelChoiceFilter(
         queryset=AttributeValue.objects.filter(attribute_type__slug='brand'),
         field_name='attributes',
         label='Бренд'
     )
-    
+
     size = django_filters.ModelChoiceFilter(
         queryset=AttributeValue.objects.filter(attribute_type__slug='size'),
         field_name='attributes',
         label='Размер'
     )
-    
+
     color = django_filters.ModelChoiceFilter(
         queryset=AttributeValue.objects.filter(attribute_type__slug='color'),
         field_name='attributes',
         label='Цвет'
     )
-    
-    # Фильтрация по остаткам
+
+    # --- фильтрация по остаткам ---
     min_stock = django_filters.NumberFilter(
         field_name='stock__quantity',
         lookup_expr='gte',
         label='Минимальный остаток'
     )
-    
+
     max_stock = django_filters.NumberFilter(
         field_name='stock__quantity',
         lookup_expr='lte',
         label='Максимальный остаток'
     )
-    
-    # Фильтрация по цене
+
+    # --- фильтрация по цене ---
     min_price = django_filters.NumberFilter(
         field_name='sale_price',
         lookup_expr='gte',
         label='Минимальная цена'
     )
-    
+
     max_price = django_filters.NumberFilter(
         field_name='sale_price',
         lookup_expr='lte',
         label='Максимальная цена'
     )
-    
-    # Специальные фильтры
+
+    # --- специальные фильтры ---
     has_stock = django_filters.BooleanFilter(
         method='filter_has_stock',
         label='Есть на складе'
     )
-    
+
     low_stock = django_filters.BooleanFilter(
         method='filter_low_stock',
         label='Низкий остаток'
@@ -73,7 +85,7 @@ class ProductFilter(django_filters.FilterSet):
         fields = [
             'name', 'barcode', 'category', 'brand', 'size', 'color',
             'min_stock', 'max_stock', 'min_price', 'max_price',
-            'has_stock', 'low_stock'
+            'has_stock', 'low_stock', 'created_by', 'created_by_username'
         ]
 
     def filter_has_stock(self, queryset, name, value):
@@ -96,48 +108,48 @@ class ProductBatchFilter(django_filters.FilterSet):
         lookup_expr='icontains',
         label='Название товара'
     )
-    
+
     supplier = django_filters.CharFilter(
         lookup_expr='icontains',
         label='Поставщик'
     )
-    
+
     min_quantity = django_filters.NumberFilter(
         field_name='quantity',
         lookup_expr='gte',
         label='Минимальное количество'
     )
-    
+
     max_quantity = django_filters.NumberFilter(
         field_name='quantity',
         lookup_expr='lte',
         label='Максимальное количество'
     )
-    
+
     created_from = django_filters.DateFilter(
         field_name='created_at',
         lookup_expr='gte',
         label='Создано с'
     )
-    
+
     created_to = django_filters.DateFilter(
         field_name='created_at',
         lookup_expr='lte',
         label='Создано до'
     )
-    
+
     expires_from = django_filters.DateFilter(
         field_name='expiration_date',
         lookup_expr='gte',
         label='Истекает с'
     )
-    
+
     expires_to = django_filters.DateFilter(
         field_name='expiration_date',
         lookup_expr='lte',
         label='Истекает до'
     )
-    
+
     expiring_soon = django_filters.BooleanFilter(
         method='filter_expiring_soon',
         label='Истекает скоро'
@@ -170,35 +182,35 @@ class StockFilter(django_filters.FilterSet):
         lookup_expr='icontains',
         label='Название товара'
     )
-    
+
     product_barcode = django_filters.CharFilter(
         field_name='product__barcode',
         lookup_expr='exact',
         label='Штрих-код товара'
     )
-    
+
     category = django_filters.NumberFilter(
         field_name='product__category',
         label='Категория'
     )
-    
+
     min_quantity = django_filters.NumberFilter(
         field_name='quantity',
         lookup_expr='gte',
         label='Минимальное количество'
     )
-    
+
     max_quantity = django_filters.NumberFilter(
         field_name='quantity',
         lookup_expr='lte',
         label='Максимальное количество'
     )
-    
+
     zero_stock = django_filters.BooleanFilter(
         method='filter_zero_stock',
         label='Нулевой остаток'
     )
-    
+
     low_stock = django_filters.BooleanFilter(
         method='filter_low_stock',
         label='Низкий остаток'

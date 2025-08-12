@@ -6,7 +6,7 @@ from rest_framework.viewsets import ModelViewSet
 from django.db import transaction, models
 from django.db.models import Q, Sum, Prefetch
 from django.utils.translation import gettext_lazy as _
-from django_filters.rest_framework import DjangoFilterBackend
+from django_filters.rest_framework import DjangoFilterBackend, FilterSet, NumberFilter, CharFilter
 from rest_framework.filters import SearchFilter, OrderingFilter
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
@@ -103,12 +103,15 @@ class AttributeValueViewSet(ModelViewSet):
     filterset_fields = ['attribute_type']
     search_fields = ['value']
 
+
+
+
 class ProductViewSet(ModelViewSet):
     serializer_class = ProductSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_class = ProductFilter
-    search_fields = ['name', 'barcode', 'category__name']
-    filterset_fields = ['category', 'created_by']
+    search_fields = ['name', 'barcode', 'category__name', 'created_by__username']
+    filterset_fields = ['category', 'created_by', 'created_by']
     ordering_fields = ['name', 'sale_price', 'created_at']
     ordering = ['-created_at']
 
@@ -186,17 +189,24 @@ class ProductViewSet(ModelViewSet):
         Создание товаров с множественными размерами.
         Каждый размер создается как отдельный Product с уникальным штрих-кодом.
         """
+        # Проверяем аутентификацию
+        if not request.user.is_authenticated:
+            return Response({
+                'error': _('Необходима аутентификация')
+            }, status=status.HTTP_401_UNAUTHORIZED)
+
         serializer = ProductMultiSizeCreateSerializer(data=request.data)
 
         if serializer.is_valid():
             try:
                 with transaction.atomic():
-                    created_products = serializer.save()
+                    # ✅ Передаем created_by
+                    created_products = serializer.save(created_by=request.user)
 
                 # Сериализуем созданные товары для ответа
-                products_data = ProductSerializer(created_products, many=True).data
+                products_data = ProductSerializer(created_products, many=True, context={'request': request}).data
 
-                logger.info(f"Создано {len(created_products)} товаров с размерами")
+                logger.info(f"Создано {len(created_products)} товаров с размерами пользователем {request.user.username}")
 
                 return Response({
                     'products': products_data,
