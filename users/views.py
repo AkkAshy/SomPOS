@@ -122,7 +122,7 @@ class LoginView(APIView):
 #         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class RegisterView(APIView):
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    permission_classes = [permissions.IsAdminUser]
 
     @swagger_auto_schema(
         operation_summary="Регистрация сотрудника",
@@ -155,14 +155,13 @@ class ProfileUpdateView(APIView):
         responses={200: UserSerializer, 400: "Неверные данные"},
         tags=['Update Profile']
     )
-
-    def put(self, request):
+    def patch(self, request):
         """
-        Обновление профиля пользователя
+        Частичное обновление профиля пользователя
 
-        PUT /api/users/profile/
+        PATCH /api/users/profile/
 
-        Request Body:
+        Request Body (любые из полей):
             {
                 "username": "string",
                 "email": "string",
@@ -173,33 +172,17 @@ class ProfileUpdateView(APIView):
                     "role": "string",
                     "phone": "string",
                     "photo": "string"
-                }
-            }
-
-        Response:
-            200: {
-                "id": integer,
-                "username": "string",
-                "email": "string",
-                "first_name": "string",
-                "last_name": "string",
-                "groups": ["string"],
-                "employee": {
-                    "role": "string",
-                    "phone": "string",
-                    "photo": "string"
-                }
-            }
-            400: {
-                "error": "string"
+                },
+                "password": "string"
             }
         """
         user = request.user
-        serializer = UserSerializer(user, data=request.data, partial=True)
+        serializer = UserSerializer(user, data=request.data, partial=True)  # ✅ partial=True
         if serializer.is_valid():
             serializer.save()
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
 
 
 
@@ -243,36 +226,64 @@ class ProfileView(APIView):
 
 
 class UserListView(APIView):
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated]
 
     @swagger_auto_schema(
-        operation_summary="Список пользователей с фильтрацией по имени и фамилии (поиск по name)",
+        operation_summary="Список пользователей с фильтрацией по имени, фамилии или ID",
         manual_parameters=[
-            openapi.Parameter('name', openapi.IN_QUERY, description="Поиск по имени, фамилии или полному имени", type=openapi.TYPE_STRING),
+            openapi.Parameter(
+                'name',
+                openapi.IN_QUERY,
+                description="Поиск по имени, фамилии или полному имени",
+                type=openapi.TYPE_STRING
+            ),
+            openapi.Parameter(
+                'id',
+                openapi.IN_QUERY,
+                description="Поиск по ID пользователя",
+                type=openapi.TYPE_INTEGER
+            ),
         ],
         responses={200: UserSerializer(many=True)},
         tags=['User List']
     )
     def get(self, request, pk=None):
         search_name = request.query_params.get('name')
+        search_id = request.query_params.get('id')
 
         users = User.objects.all()
 
-        if search_name:
-            # Добавляем аннотированное поле full_name
-            users = users.annotate(
-                full_name=Concat('first_name', Value(' '), 'last_name')
-            ).filter(
-                Q(first_name__icontains=search_name) |
-                Q(last_name__icontains=search_name) |
-                Q(full_name__icontains=search_name)
-            )
+        if search_name or search_id:
+            filters = Q()
+            if search_name:
+                # Добавляем аннотированное поле full_name
+                users = users.annotate(
+                    full_name=Concat('first_name', Value(' '), 'last_name')
+                )
+                filters |= (
+                    Q(first_name__icontains=search_name) |
+                    Q(last_name__icontains=search_name) |
+                    Q(full_name__icontains=search_name)
+                )
+            if search_id:
+                try:
+                    search_id = int(search_id)
+                    filters |= Q(id__exact=search_id)
+                except ValueError:
+                    logger.warning(f"Invalid ID format: {search_id}")
+                    return Response(
+                        {"error": "Параметр 'id' должен быть целым числом"},
+                        status=400
+                    )
+
+            users = users.filter(filters)
 
         serializer = UserSerializer(users, many=True)
+        logger.debug(f"Retrieved {len(users)} users with filters: name={search_name}, id={search_id}")
         return Response(serializer.data)
 
 class UserDetailView(APIView):
-    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated]
 
     @swagger_auto_schema(
         operation_summary="Детальный вид пользователя по ID",

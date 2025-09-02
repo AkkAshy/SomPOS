@@ -6,9 +6,80 @@ from drf_yasg.utils import swagger_auto_schema
 from .serializers import CustomerSerializer
 from .models import Customer
 
+from rest_framework.pagination import LimitOffsetPagination, PageNumberPagination
+
+
+
+class FlexiblePagination(PageNumberPagination):
+    page_size_query_param = "page_size"
+    max_page_size = 1000
+
+    def paginate_queryset(self, queryset, request, view=None):
+        self.request = request
+
+        # 👉 если ни page, ни limit/offset нет — вернуть все данные
+        if not request.query_params.get("page") and not request.query_params.get("limit") and not request.query_params.get("offset"):
+            self.all_data = True
+            self.queryset = list(queryset)
+            return self.queryset
+
+        # 👉 режим "все данные" по ?page=all
+        if request.query_params.get("page") == "all":
+            self.all_data = True
+            self.queryset = list(queryset)
+            return self.queryset
+
+        # 👉 режим offset/limit
+        limit = request.query_params.get("limit")
+        offset = request.query_params.get("offset")
+        if limit is not None:
+            try:
+                limit = int(limit)
+                offset = int(offset or 0)
+                self.all_data = False
+                self.queryset = queryset[offset:offset + limit]
+                self.count = queryset.count()
+                return list(self.queryset)
+            except ValueError:
+                pass
+
+        # 👉 fallback — обычная пагинация по страницам
+        self.all_data = False
+        return super().paginate_queryset(queryset, request, view)
+
+    def get_paginated_response(self, data):
+        if getattr(self, "all_data", False):
+            return Response({
+                "count": len(data),
+                "next": None,
+                "previous": None,
+                "results": data
+            })
+
+        if self.request.query_params.get("limit") is not None:
+            next_offset = None
+            offset = int(self.request.query_params.get("offset", 0))
+            limit = int(self.request.query_params.get("limit", 0))
+            if self.count > (offset + len(data)):
+                next_offset = offset + len(data)
+            prev_offset = offset - limit if offset > 0 else None
+            if prev_offset is not None and prev_offset < 0:
+                prev_offset = 0
+
+            return Response({
+                "count": self.count,
+                "next": f"?limit={limit}&offset={next_offset}" if next_offset is not None else None,
+                "previous": f"?limit={limit}&offset={prev_offset}" if prev_offset is not None else None,
+                "results": data
+            })
+
+        return super().get_paginated_response(data)
+
+
+
 class CustomerViewSet(viewsets.ModelViewSet):
     serializer_class = CustomerSerializer
-    pagination_class = pagination.PageNumberPagination
+    pagination_class = FlexiblePagination
 
     def get_queryset(self):
         queryset = Customer.objects.annotate(
@@ -17,7 +88,6 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 filter=Q(purchases__status='completed')
             )
         )
-
         request = self.request
         query = request.query_params.get('q', '').strip()
         date_from_str = request.query_params.get('date_from')
@@ -48,21 +118,3 @@ class CustomerViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(annotated_last_purchase_date__date__lte=date_to)
 
         return queryset.distinct()
-
-    @swagger_auto_schema(
-        operation_description="Создание нового клиента",
-        request_body=CustomerSerializer,
-        responses={
-            201: CustomerSerializer,
-            400: "Невалидные данные"
-        }
-    )
-    def create(self, request):
-        number = request.data.get('number')
-
-        if Customer.objects.filter(number=number).exists():
-            return Response(
-                {"message": "Клиент с таким номером уже существует."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        return super().create(request)

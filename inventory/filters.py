@@ -1,7 +1,117 @@
 # inventory/filters.py
 import django_filters
+from django_filters import rest_framework as filters
 from django.db.models import Q
-from .models import Product, ProductBatch, Stock, AttributeType, AttributeValue
+from .models import Product, ProductBatch, Stock, AttributeType, AttributeValue, SizeInfo
+
+
+
+class SizeInfoFilter(filters.FilterSet):
+    """
+    Фильтр для размерной информации
+    """
+    # Фильтр по размеру (точное совпадение и множественный выбор)
+    size = filters.MultipleChoiceFilter(
+        choices=SizeInfo.SIZE_CHOICES,
+        field_name='size',
+        lookup_expr='exact'
+    )
+
+    # Фильтр по обхвату груди (диапазон)
+    chest_min = filters.NumberFilter(
+        field_name='chest',
+        lookup_expr='gte',
+        label='Минимальный обхват груди'
+    )
+    chest_max = filters.NumberFilter(
+        field_name='chest',
+        lookup_expr='lte',
+        label='Максимальный обхват груди'
+    )
+    chest = filters.RangeFilter(
+        field_name='chest',
+        label='Диапазон обхвата груди'
+    )
+
+    # Фильтр по обхвату талии (диапазон)
+    waist_min = filters.NumberFilter(
+        field_name='waist',
+        lookup_expr='gte',
+        label='Минимальный обхват талии'
+    )
+    waist_max = filters.NumberFilter(
+        field_name='waist',
+        lookup_expr='lte',
+        label='Максимальный обхват талии'
+    )
+    waist = filters.RangeFilter(
+        field_name='waist',
+        label='Диапазон обхвата талии'
+    )
+
+    # Фильтр по длине (диапазон)
+    length_min = filters.NumberFilter(
+        field_name='length',
+        lookup_expr='gte',
+        label='Минимальная длина'
+    )
+    length_max = filters.NumberFilter(
+        field_name='length',
+        lookup_expr='lte',
+        label='Максимальная длина'
+    )
+    length = filters.RangeFilter(
+        field_name='length',
+        label='Диапазон длины'
+    )
+
+    # Фильтр для поиска по всем размерам (содержит)
+    size_contains = filters.CharFilter(
+        field_name='size',
+        lookup_expr='icontains',
+        label='Поиск по размеру (содержит)'
+    )
+
+    # Фильтр для пустых значений
+    has_chest = filters.BooleanFilter(
+        field_name='chest',
+        lookup_expr='isnull',
+        exclude=True,
+        label='Есть данные об обхвате груди'
+    )
+    has_waist = filters.BooleanFilter(
+        field_name='waist',
+        lookup_expr='isnull',
+        exclude=True,
+        label='Есть данные об обхвате талии'
+    )
+    has_length = filters.BooleanFilter(
+        field_name='length',
+        lookup_expr='isnull',
+        exclude=True,
+        label='Есть данные о длине'
+    )
+
+    class Meta:
+        model = SizeInfo
+        fields = {
+            'size': ['exact', 'in'],
+            'chest': ['exact', 'gte', 'lte', 'range'],
+            'waist': ['exact', 'gte', 'lte', 'range'],
+            'length': ['exact', 'gte', 'lte', 'range'],
+        }
+
+    def filter_by_measurements(self, queryset, name, value):
+        """
+        Кастомный фильтр для поиска по приближенным размерам
+        """
+        if value:
+            # Логика для поиска подходящих размеров по параметрам
+            return queryset.filter(
+                chest__lte=value + 5,
+                chest__gte=value - 5
+            )
+        return queryset
 
 
 class ProductFilter(django_filters.FilterSet):

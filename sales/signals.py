@@ -7,29 +7,65 @@ import json
 
 @receiver(post_save, sender=Transaction)
 def log_transaction(sender, instance, created, **kwargs):
-    action = 'created' if created else instance.status
+    """
+    ИСПРАВЛЕННАЯ версия - создает записи только когда нужно
+    """
+    # Определяем действие
+    if created:
+        action = 'created'
+    else:
+        action = instance.status
+
+    # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Проверяем не существует ли уже такая запись
+    existing_record = TransactionHistory.objects.filter(
+        transaction=instance,
+        action=action
+    ).first()
+
+    if existing_record:
+        # Запись уже есть - обновляем её данные вместо создания новой
+        details = {
+            'total_amount': str(instance.total_amount),
+            'payment_method': instance.payment_method,
+            'cashier': instance.cashier.username if instance.cashier else None,
+            'customer': instance.customer.full_name if instance.customer else None,
+            'items': [
+                {
+                    'product': item.product.name,
+                    'quantity': item.quantity,
+                    'price': str(item.price)
+                }
+                for item in instance.items.all()
+            ]
+        }
+        existing_record.details = json.dumps(details, ensure_ascii=False)
+        existing_record.save()
+        return  # Выходим, не создаем новую запись
+
+    # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: Создаем записи только для важных событий
+    important_actions = ['created', 'completed', 'refunded']
+    if action not in important_actions:
+        return  # Пропускаем промежуточные статусы
+
+    # Создаем новую запись только если её еще нет
     details = {
         'total_amount': str(instance.total_amount),
         'payment_method': instance.payment_method,
         'cashier': instance.cashier.username if instance.cashier else None,
         'customer': instance.customer.full_name if instance.customer else None,
         'items': [
-            {'product': item.product.name, 'quantity': item.quantity, 'price': str(item.price)}
+            {
+                'product': item.product.name,
+                'quantity': item.quantity,
+                'price': str(item.price)
+            }
             for item in instance.items.all()
         ]
     }
+
     TransactionHistory.objects.create(
         transaction=instance,
         action=action,
         details=json.dumps(details, ensure_ascii=False)
     )
-
-
-@receiver(post_save, sender=Transaction)
-def update_customer_last_purchase(sender, instance, **kwargs):  # ← ✅ другое имя
-    customer = instance.customer
-    if customer and instance.status == 'completed':  # ← Можно добавить проверку статуса
-        if not customer.last_purchase_date or instance.created_at > customer.last_purchase_date:
-            customer.last_purchase_date = instance.created_at
-            customer.save(update_fields=['last_purchase_date'])
 

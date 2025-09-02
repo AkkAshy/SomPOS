@@ -9,6 +9,7 @@ from .models import (Product, ProductCategory, Stock,
                      AttributeValue, ProductAttribute,
                      SizeChart, SizeInfo
                      )
+from users.serializers import UserSerializer
 
 class ProductCategorySerializer(serializers.ModelSerializer):
     class Meta:
@@ -147,6 +148,7 @@ class ProductSerializer(serializers.ModelSerializer):
         read_only=True,
         help_text=_('Партии товара')
     )
+    created_by = UserSerializer(read_only=True)
 
     class Meta:
         model = Product
@@ -285,149 +287,88 @@ class ProductMultiSizeCreateSerializer(serializers.Serializer):
     category = serializers.PrimaryKeyRelatedField(queryset=ProductCategory.objects.all())
     sale_price = serializers.DecimalField(max_digits=12, decimal_places=2)
     unit = serializers.CharField(max_length=50)
-    size_ids = serializers.ListField(
-        child=serializers.IntegerField(),
-        allow_empty=False
+    batch_info = serializers.ListField(
+        child=serializers.DictField(),
+        required=False,
+        allow_empty=True
     )
-    batch_info = serializers.DictField(required=False)
+
+    def validate_batch_info(self, value):
+        """Валидация batch_info"""
+        if not value:
+            return value
+
+        for batch in value:
+            # Проверяем обязательные поля
+            required_fields = ['size_id', 'quantity', 'purchase_price', 'supplier']
+            for field in required_fields:
+                if field not in batch:
+                    raise serializers.ValidationError(f"Поле '{field}' обязательно для batch_info")
+
+            # Проверяем что size_id существует
+            try:
+                SizeInfo.objects.get(id=batch['size_id'])
+            except SizeInfo.DoesNotExist:
+                raise serializers.ValidationError(f"Размер с ID {batch['size_id']} не найден")
+
+            # Проверяем количество
+            if batch['quantity'] <= 0:
+                raise serializers.ValidationError("Количество должно быть больше нуля")
+
+        return value
 
     def save(self, **kwargs):
-        """
-        Создает товары для каждого размера
-        """
-        created_by = kwargs.get('created_by')  # Получаем пользователя
+        created_by = kwargs.get('created_by')
         if not created_by:
             raise serializers.ValidationError("created_by is required")
 
         validated_data = self.validated_data
-        size_ids = validated_data.pop('size_ids')
-        batch_info = validated_data.pop('batch_info', None)
+        batch_info = validated_data.get('batch_info', [])
 
         created_products = []
+
+        # Извлекаем уникальные размеры из batch_info
+        size_ids = list(set(batch['size_id'] for batch in batch_info))
+
+        if not size_ids:
+            raise serializers.ValidationError("Необходимо указать хотя бы один размер в batch_info")
 
         for size_id in size_ids:
             try:
                 size_instance = SizeInfo.objects.get(id=size_id)
-
-
-                # Генерируем уникальное имя и штрих-код
                 product_name = f"{validated_data['name']} - {size_instance.size}"
                 unique_barcode = self.generate_unique_barcode()
 
                 # Создаем товар
-                product_data = {
-                    **validated_data,
-                    'name': product_name,
-                    'barcode': unique_barcode,
-                    'created_by': created_by,  # ✅ Устанавливаем created_by
-                    'size': size_instance
-                }
+                product = Product.objects.create(
+                    name=product_name,
+                    barcode=unique_barcode,
+                    created_by=created_by,
+                    category=validated_data['category'],
+                    sale_price=validated_data['sale_price'],
+                    unit=validated_data['unit'],
+                    size=size_instance
+                )
 
-                product = Product.objects.create(**product_data)
-
-                # Создаем партию если указана
-                if batch_info:
+                # Создаем batch для этого размера
+                batch_for_size = next((b for b in batch_info if b['size_id'] == size_id), None)
+                if batch_for_size:
                     ProductBatch.objects.create(
                         product=product,
-                        **batch_info
+                        quantity=batch_for_size['quantity'],
+                        purchase_price=batch_for_size['purchase_price'],
+                        supplier=batch_for_size['supplier'],
+                        expiration_date=batch_for_size.get('expiration_date')
                     )
 
-                # Генерируем лейбл
                 product.generate_label()
-
                 created_products.append(product)
 
             except SizeInfo.DoesNotExist:
-                raise serializers.ValidationError(f"Size with id {size_id} does not exist")
+                raise serializers.ValidationError(f"Размер с ID {size_id} не найден")
 
         return created_products
 
     def generate_unique_barcode(self):
-        """Генерирует уникальный штрих-код"""
         import uuid
         return str(uuid.uuid4().int)[:12]
-
-# class ProductMultiSizeCreateSerializer(serializers.Serializer):
-#     """
-#     Сериализатор для создания товаров с множественными размерами
-#     """
-#     name = serializers.CharField(max_length=255)
-#     category = serializers.PrimaryKeyRelatedField(queryset=ProductCategory.objects.all())
-#     sale_price = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
-#     unit = serializers.ChoiceField(choices=Product.UNIT_CHOICES, default='piece')
-
-#     # Список ID размеров, которые нужно создать
-#     size_ids = serializers.ListField(
-#         child=serializers.PrimaryKeyRelatedField(queryset=SizeInfo.objects.all()),
-#         allow_empty=False,
-#         help_text="Список ID размеров для создания отдельных товаров"
-#     )
-
-#     # Информация о партии (опционально)
-#     batch_info = serializers.DictField(required=False, help_text="Информация о партии")
-
-#     def validate_name(self, value):
-#         return value.strip()
-
-#     def validate_sale_price(self, value):
-#         return round(value, 2)
-
-#     def create(self, validated_data):
-#         """
-#         Создает отдельный Product для каждого выбранного размера
-#         """
-#         size_ids = validated_data.pop('size_ids')
-#         batch_info = validated_data.pop('batch_info', None)
-#         base_name = validated_data['name']
-
-#         created_products = []
-
-#         for size in size_ids:
-#             # Создаем уникальное название с размером
-#             product_name = f"{base_name} - {size.size}"
-
-#             # Генерируем уникальный штрих-код
-#             barcode = self._generate_unique_barcode()
-
-#             # Создаем товар
-#             product_data = {
-#                 **validated_data,
-#                 'name': product_name,
-#                 'barcode': barcode,
-#                 'size': size
-#             }
-
-#             product = Product.objects.create(**product_data)
-
-#             # Создаем партию если указана
-#             if batch_info:
-#                 ProductBatch.objects.create(
-#                     product=product,
-#                     **batch_info
-#                 )
-
-#             # Генерируем этикетку
-#             product.generate_label()
-
-#             created_products.append(product)
-
-#         return created_products
-
-#     def _generate_unique_barcode(self):
-#         """
-#         Генерирует уникальный штрих-код
-#         """
-#         import random
-#         import time
-
-#         while True:
-#             # Генерируем штрих-код из текущего времени и случайного числа
-#             timestamp = str(int(time.time()))[-8:]  # Последние 8 цифр времени
-#             random_part = str(random.randint(1000, 9999))  # 4 случайные цифры
-#             barcode = timestamp + random_part
-
-#             # Проверяем уникальность
-#             if not Product.objects.filter(barcode=barcode).exists():
-#                 return barcode
-############################################################### Продукты конец #############################################################
-

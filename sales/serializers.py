@@ -132,17 +132,17 @@ class FilteredTransactionHistorySerializer(serializers.ModelSerializer):
         except json.JSONDecodeError:
             return None
 
-    def to_representation(self, instance):
-        """
-        Переопределяем для исключения записей с пустыми parsed_details
-        """
-        data = super().to_representation(instance)
+    # def to_representation(self, instance):
+    #     """
+    #     Переопределяем для исключения записей с пустыми parsed_details
+    #     """
+    #     data = super().to_representation(instance)
 
-        # Если parsed_details пустые, возвращаем None (исключаем из результата)
-        if not data.get('parsed_details'):
-            return None
+    #     # Если parsed_details пустые, возвращаем None (исключаем из результата)
+    #     if not data.get('parsed_details'):
+    #         return None
 
-        return data
+    #     return data
 
 
 class CashierAggregateSerializer(serializers.Serializer):

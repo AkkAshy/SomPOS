@@ -4,17 +4,15 @@ from django.core.validators import MinValueValidator
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.db.models import Sum, F
+from django.conf import settings
 from django.utils.text import format_lazy
 from django.core.files.base import ContentFile
 from django.core.exceptions import ValidationError
 from django.utils.translation import gettext_lazy as _
 import barcode
+from io import BytesIO
 from barcode.writer import ImageWriter
-import os
-from PIL import Image as PILImage, ImageDraw, ImageFont
-from django.conf import settings
-from reportlab.lib.pagesizes import A6
-from reportlab.platypus import Image
+from PIL import Image as PILImage
 from io import BytesIO
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
@@ -179,196 +177,31 @@ class Product(models.Model):
 
     @classmethod
     def generate_unique_barcode(cls):
-        """
-        Генерирует уникальный штрих-код для товара
-        """
+        import uuid
         import random
         import time
-        from django.utils import timezone
-
+        """Генерирует уникальный штрих-код"""
         max_attempts = 100
         attempts = 0
 
         while attempts < max_attempts:
-            # Вариант 1: На основе времени и случайных чисел
-            timestamp = str(int(timezone.now().timestamp()))[-6:]  # 6 последних цифр времени
+
+            timestamp = str(int(time.time()))[-6:]  # 6 последних цифр времени
+
             random_part = str(random.randint(100000, 999999))  # 6 случайных цифр
-            barcode = timestamp + random_part
 
-            # Проверяем уникальность
-            if not cls.objects.filter(barcode=barcode).exists():
-                return barcode
+            barcode_code = timestamp + random_part
 
+            checksum = cls()._calculate_ean13_checksum(barcode_code)
+
+            full_ean = barcode_code + checksum
+            # Проверяем уникальность в базе
+            if not cls.objects.filter(barcode=full_ean).exists():
+                return full_ean
             attempts += 1
 
-        # Если не удалось сгенерировать за 100 попыток, используем UUID
-        import uuid
-        return str(uuid.uuid4().int)[:12]  # Первые 12 цифр из UUID
-
-    class Meta:
-        verbose_name = "Товар"
-        verbose_name_plural = "Товары"
-        indexes = [
-            models.Index(fields=['name', 'barcode']),
-        ]
-
-    def __str__(self):
-        return f"{self.name} ({self.get_unit_display()})"
-
-
-    def clean(self):
-        """Валидация перед сохранением"""
-        super().clean()
-        if self.barcode:
-            # Проверяем, что штрих-код состоит только из цифр
-            barcode_str = str(self.barcode).strip()
-            if not barcode_str.isdigit():
-                raise ValidationError({'barcode': "Штрих-код должен содержать только цифры."})
-
-    def generate_label(self):
-        """Основной метод генерации этикетки без временных файлов"""
-        if not self.barcode:
-            logger.warning("Штрих-код отсутствует - этикетка не будет создана")
-            return False
-
-        try:
-            # 1. Генерируем штрих-код в памяти
-            barcode_image = self._generate_barcode_image()
-
-            # 2. Создаем полную этикетку
-            label_bytes = self._create_label_image(barcode_image)
-
-            # 3. Сохраняем этикетку (ИСПРАВЛЕНО: используем правильное имя поля)
-            label_filename = f'product_labels/product_{self.id}_label.png'
-            self.image_label.save(label_filename, ContentFile(label_bytes), save=False)
-
-            # Сохраняем только поле image_label, чтобы не вызвать рекурсию
-            super().save(update_fields=['image_label'])
-
-            logger.info(f"Этикетка успешно создана для товара {self.id}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Ошибка генерации этикетки: {str(e)}", exc_info=True)
-            return False
-
-    def _generate_barcode_image(self):
-        """Генерирует изображение штрих-кода в памяти"""
-        barcode_str = str(self.barcode).strip().zfill(12)[:12]
-        full_ean = barcode_str + self._calculate_ean13_checksum(barcode_str)
-
-        try:
-            # Создаем штрих-код в памяти
-            ean = barcode.get_barcode_class('ean13')
-            barcode_buffer = BytesIO()
-            ean(full_ean, writer=ImageWriter()).write(barcode_buffer)
-            barcode_buffer.seek(0)
-            barcode_img = PILImage.open(barcode_buffer)
-
-            # Масштабируем штрих-код до нужного размера
-            barcode_img = barcode_img.resize((120, 100), PILImage.Resampling.LANCZOS)
-            return barcode_img
-
-        except Exception as e:
-            logger.error(f"Ошибка генерации штрих-кода: {str(e)}")
-            raise
-
-    def _create_label_image(self, barcode_img):
-        """Создает этикетку в памяти с улучшенной компоновкой"""
-        try:
-            # 1. Создаем холст (увеличиваем высоту для всех элементов)
-            label_width, label_height = 120, 100
-            label_img = PILImage.new("RGB", (label_width, label_height), "white")
-            draw = ImageDraw.Draw(label_img)
-
-            # 2. Настраиваем шрифты
-            try:
-                # Пробуем разные варианты шрифтов
-                title_font = ImageFont.truetype("arial.ttf", 18)
-                info_font = ImageFont.truetype("arial.ttf", 25)
-                barcode_font = ImageFont.truetype("arial.ttf", 12)
-            except (OSError, IOError):
-                try:
-                    # Для Linux систем
-                    title_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 18)
-                    info_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
-                    barcode_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
-                except (OSError, IOError):
-                    # Используем стандартный шрифт
-                    title_font = ImageFont.load_default()
-                    info_font = ImageFont.load_default()
-                    barcode_font = ImageFont.load_default()
-
-            # 3. Добавляем название товара (с переносом строк если длинное)
-            y_offset = 10
-            name_text = self.name[:50] + '...' if len(self.name) > 50 else self.name
-
-            # Центрируем название
-            bbox = draw.textbbox((0, 0), name_text, font=title_font)
-            text_width = bbox[2] - bbox[0]
-            x_center = (label_width - text_width) // 2
-
-            draw.text((x_center, y_offset), name_text, fill="black", font=title_font)
-            y_offset += 35
-
-            # 4. Добавляем информацию о товаре
-            info_lines = []
-
-            # # Цена
-            # if self.sale_price:
-            #     info_lines.append(f"Цена: {self.sale_price:.2f} UZS")
-
-
-            # # Размер
-            # if self.size:
-            #     info_lines.append(f"Размер: {self.size}")
-
-            # # Единица измерения
-            # info_lines.append(f"Единица: {self.get_unit_display()}")
-
-            # # Категория
-            # if self.category:
-            #     info_lines.append(f"Категория: {self.category.name}")
-
-            # Отображаем информацию
-            # for line in info_lines:
-            #     bbox = draw.textbbox((0, 0), line, font=info_font)
-            #     text_width = bbox[2] - bbox[0]
-            #     x_center = (label_width - text_width) // 2
-            #     draw.text((x_center, y_offset), line, fill="black", font=info_font)
-            #     y_offset += 25
-
-
-
-            # 5. Добавляем штрих-код
-            y_offset += 10  # Небольшой отступ
-            barcode_width, barcode_height = barcode_img.size
-            x_barcode = (label_width - barcode_width) // 2
-
-            # Вставляем штрих-код
-            label_img.paste(barcode_img, (x_barcode, y_offset))
-            y_offset += barcode_height + 5
-
-            # 6. Добавляем номер штрих-кода под изображением
-            # barcode_text = str(self.barcode)
-            # bbox = draw.textbbox((0, 0), barcode_text, font=barcode_font)
-            # text_width = bbox[2] - bbox[0]
-            # x_center = (label_width - text_width) // 2
-
-            # draw.text((x_center, y_offset), barcode_text, fill="black", font=barcode_font)
-            # y_offset += barcode_font.getsize(barcode_text)[1]
-
-            # 7. Добавляем рамку
-            # draw.rectangle([0, 0, label_width-1, label_height-1], outline="black", width=2)
-
-            # 8. Сохраняем в bytes
-            buffer = BytesIO()
-            label_img.save(buffer, format="PNG", quality=95)
-            return buffer.getvalue()
-
-        except Exception as e:
-            logger.error(f"Ошибка создания этикетки: {str(e)}", exc_info=True)
-            raise
+        data12 = str(uuid.uuid4().int)[:12]
+        return data12 + cls()._calculate_ean13_checksum(data12)
 
     def _calculate_ean13_checksum(self, digits):
         """Вычисляет контрольную цифру EAN-13"""
@@ -376,39 +209,116 @@ class Product(models.Model):
         total = sum(int(d) * w for d, w in zip(digits, weights))
         return str((10 - (total % 10)) % 10)
 
+    def _generate_barcode_image(self, barcode_str):
+        """Генерирует изображение штрих-кода (размер 700x200, без текста)"""
+        barcode_str = str(barcode_str).strip().zfill(12)[:12]
+        full_ean = barcode_str + self._calculate_ean13_checksum(barcode_str)
+
+        writer = ImageWriter()
+        writer.set_options({
+            'module_height': 20.0,    # Высота полосок
+            'module_width': 0.4,      # Ширина полосок
+            'quiet_zone': 0.0,        # Без отступов
+            'font_size': 0,           # Отключаем шрифт
+            'write_text': False,      # Явно отключаем текст
+            'text_distance': 0.0,     # Убираем расстояние для текста
+            'dpi': 600,               # Качество изображения
+        })
+
+        ean = barcode.get_barcode_class('ean13')
+        buffer = BytesIO()
+        try:
+            ean(full_ean, writer=writer).write(buffer)
+            buffer.seek(0)
+
+            barcode_img = PILImage.open(buffer)
+
+            # Убираем белые поля и область текста
+            bbox = barcode_img.getbbox()
+            if bbox:
+                width, height = barcode_img.size
+                crop_box = (bbox[0], bbox[1], bbox[2], int(height * 0.7))
+                barcode_img = barcode_img.crop(crop_box)
+
+            # Масштабируем до размера 700x200
+            target_size = (700, 200)
+            barcode_img = barcode_img.resize(target_size, PILImage.Resampling.LANCZOS)
+
+            return barcode_img
+        finally:
+            buffer.close()
+
+    def _create_label_bytes(self, barcode_img):
+        """Создаёт байты изображения"""
+        buffer = BytesIO()
+        barcode_img.save(buffer, format="PNG", quality=95)
+        buffer.seek(0)
+        label_bytes = buffer.getvalue()
+        buffer.close()
+        return label_bytes
+
+    def generate_label(self):
+        """Основной метод генерации этикетки"""
+        if not self.barcode:
+            logger.warning("Штрих-код отсутствует - этикетка не будет создана")
+            return False
+
+        try:
+            barcode_img = self._generate_barcode_image(self.barcode)
+            label_bytes = self._create_label_bytes(barcode_img)
+
+            label_filename = f'product_{self.id}_label.png'
+
+            # Удаляем старый файл, если он существует
+            if self.image_label:
+                self.image_label.delete(save=False)
+
+            # Сохраняем новый файл
+            self.image_label.save(label_filename, ContentFile(label_bytes), save=False)
+            super().save(update_fields=['image_label'])
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка генерации этикетки: {str(e)}", exc_info=True)
+            return False
+
     def save(self, *args, **kwargs):
-        """Переопределяем save для автоматической генерации этикетки"""
+        """Переопределяем save для автогенерации штрихкода и этикетки"""
         is_new = self._state.adding
         update_fields = kwargs.get('update_fields')
 
-        # Если обновляем только image_label — не генерируем заново
+        # Если обновляем только image_label, просто сохраняем
         if update_fields and update_fields == ['image_label']:
             super().save(*args, **kwargs)
             return
 
-        # Сохраняем сначала, чтобы был self.id (для генерации label_filename)
+        # Генерируем штрихкод, если его нет
+        if is_new and not self.barcode:
+            self.barcode = self.generate_unique_barcode()
+
+        # Сохраняем объект, чтобы получить self.id
         super().save(*args, **kwargs)
 
-        # Поля, которые влияют на этикетку
-        label_relevant_fields = ['name', 'barcode', 'sale_price', 'size']
-
-        # Проверяем, изменились ли они (только если объект уже существовал)
-        if not is_new:
-            current = Product.objects.filter(pk=self.pk).values(*label_relevant_fields).first()
-            if current:
-                fields_changed = any(
-                    str(getattr(self, f)) != str(current[f])
-                    for f in label_relevant_fields
-                    if getattr(self, f) is not None or current[f] is not None
-                )
-            else:
-                fields_changed = False
-        else:
-            fields_changed = True  # новый товар — точно нужна этикетка
-
-        # Генерируем этикетку, если это новый товар или поля изменились
-        if is_new or fields_changed:
+        # Генерируем этикетку для нового объекта или если штрихкод изменился
+        if is_new or (update_fields and 'barcode' in update_fields):
             self.generate_label()
+
+    def clean(self):
+        """Валидация перед сохранением"""
+        super().clean()
+        if self.barcode:
+            barcode_str = str(self.barcode).strip()
+            if not barcode_str.isdigit():
+                raise ValidationError({'barcode': "Штрих-код должен содержать только цифры."})
+
+    def __str__(self):
+        return f"{self.name} ({self.get_unit_display()})"
+
+    class Meta:
+        verbose_name = "Товар"
+        verbose_name_plural = "Товары"
+        indexes = [
+            models.Index(fields=['name', 'barcode']),
+        ]
 
 
 class ProductAttribute(models.Model):

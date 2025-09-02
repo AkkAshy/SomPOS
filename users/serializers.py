@@ -23,13 +23,26 @@ class UserSerializer(serializers.ModelSerializer):
         queryset=Group.objects.all(),
         required=True
     )
+    full_name = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ['id', 'username', 'password', 'email', 'groups', 'first_name', 'last_name', 'employee']
+        fields = [
+            'id', 'username', 'email', 'groups', 'first_name', 'last_name',
+            'full_name', 'employee', 'password',
+        ]
         extra_kwargs = {
             'password': {'write_only': True}
         }
+    def get_full_name(self, obj):
+        return f"{obj.first_name} {obj.last_name}".strip() or obj.username
+
+    def get_employee(self, obj):
+        try:
+            employee = obj.employee  # Получаем связанного сотрудника
+            return EmployeeSerializer(employee).data
+        except Employee.DoesNotExist:
+            return None
 
     def create(self, validated_data):
         employee_data = validated_data.pop('employee', None)
@@ -43,6 +56,33 @@ class UserSerializer(serializers.ModelSerializer):
             Employee.objects.create(user=user, **employee_data)
 
         return user
+
+    def update(self, instance, validated_data):
+        employee_data = validated_data.pop('employee', None)
+        groups = validated_data.pop('groups', None)
+        password = validated_data.pop('password', None)
+
+        # обновляем пользователя
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+
+        if password:
+            instance.set_password(password)
+
+        instance.save()
+
+        # обновляем группы, если переданы
+        if groups is not None:
+            instance.groups.set([Group.objects.get(name=name) for name in groups])
+
+        # обновляем employee
+        if employee_data:
+            employee, _ = Employee.objects.get_or_create(user=instance)
+            for attr, value in employee_data.items():
+                setattr(employee, attr, value)
+            employee.save()
+
+        return instance
 
 
 class LoginSerializer(serializers.Serializer):

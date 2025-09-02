@@ -18,9 +18,12 @@ router.register(r'size-info', views.SizeInfoViewSet, basename='sizeinfo')
 urlpatterns = [
     # ViewSets через роутер
     path('', include(router.urls)),
-    
+
     # Дополнительные эндпоинты
     path('stats/', views.InventoryStatsView.as_view(), name='inventory-stats'),
+    # в urls.py
+    path('media/<path:path>', views.serve_media, name='serve_media'),
+    path("products/<int:pk>/label/", views.product_label_proxy, name="product_label_proxy"),
 ]
 
 """
@@ -55,14 +58,14 @@ urlpatterns = [
 - GET    products/                      - Список товаров
 - POST   products/                      - Создать товар/добавить партию
 - GET    products/{id}/                 - Получить товар
-- PUT    products/{id}/                 - Обновить товар  
+- PUT    products/{id}/                 - Обновить товар
 - PATCH  products/{id}/                 - Частично обновить товар
 - DELETE products/{id}/                 - Удалить товар
 - GET    products/scan_barcode/?barcode=123 - Сканировать штрих-код
 - POST   products/{id}/sell/            - Продать товар
 - GET    products/low_stock/            - Товары с низким остатком
 
-ПАРТИИ ТОВАРОВ:  
+ПАРТИИ ТОВАРОВ:
 - GET    batches/                       - Список партий
 - POST   batches/                       - Создать партию
 - GET    batches/{id}/                  - Получить партию

@@ -1,3 +1,4 @@
+
 # inventory/views.py
 from rest_framework import status, generics
 from rest_framework.decorators import action
@@ -8,11 +9,15 @@ from django.db.models import Q, Sum, Prefetch
 from django.utils.translation import gettext_lazy as _
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet, NumberFilter, CharFilter
 from rest_framework.filters import SearchFilter, OrderingFilter
+from rest_framework.pagination import LimitOffsetPagination
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 import logging
 from django.core.exceptions import ValidationError
 from rest_framework import pagination
+from .pagination import OptionalPagination
+
+from customers.views import FlexiblePagination
 
 from .models import (
     Product, ProductCategory, Stock, ProductBatch,
@@ -26,9 +31,46 @@ from .serializers import (
     ProductMultiSizeCreateSerializer
 )
 
-from .filters import ProductFilter, ProductBatchFilter, StockFilter
+from .filters import ProductFilter, ProductBatchFilter, StockFilter, SizeInfoFilter
+# в одном из ваших приложений views.py
+from django.http import HttpResponse, Http404
+from django.conf import settings
+import os
+
+def serve_media(request, path):
+    try:
+        media_path = os.path.join(settings.MEDIA_ROOT, path)
+        with open(media_path, 'rb') as f:
+            response = HttpResponse(f.read(), content_type='image/png')
+            response['Access-Control-Allow-Origin'] = 'http://localhost:5173'
+            return response
+    except:
+        raise Http404
+
+
+
 
 logger = logging.getLogger('inventory')
+
+class SizeInfoPagination(LimitOffsetPagination):
+    """
+    Кастомная пагинация для SizeInfo
+    """
+    default_limit = 20
+    limit_query_param = 'limit'
+    offset_query_param = 'offset'
+    max_limit = 100
+
+    def get_paginated_response(self, data):
+        return Response({
+            'count': self.count,
+            'limit': self.limit,
+            'offset': self.offset,
+            'next': self.get_next_link(),
+            'previous': self.get_previous_link(),
+            'results': data
+        })
+
 
 
 class ProductCategoryViewSet(ModelViewSet):
@@ -107,6 +149,7 @@ class AttributeValueViewSet(ModelViewSet):
 
 
 class ProductViewSet(ModelViewSet):
+    pagination_class = FlexiblePagination
     serializer_class = ProductSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_class = ProductFilter
@@ -188,6 +231,30 @@ class ProductViewSet(ModelViewSet):
         """
         Создание товаров с множественными размерами.
         Каждый размер создается как отдельный Product с уникальным штрих-кодом.
+
+        Пример запроса:
+        {
+            "name": "Футболка Армани",
+            "category": 1,
+            "sale_price": 150000.00,
+            "unit": "piece",
+            "batch_info": [
+                {
+                    "size_id": 2,
+                    "quantity": 20,
+                    "purchase_price": 100000.00,
+                    "supplier": "Армани Official",
+                    "expiration_date": null
+                },
+                {
+                    "size_id": 4,
+                    "quantity": 30,
+                    "purchase_price": 100000.00,
+                    "supplier": "Армани Official",
+                    "expiration_date": null
+                }
+            ]
+        }
         """
         # Проверяем аутентификацию
         if not request.user.is_authenticated:
@@ -602,12 +669,148 @@ class StockViewSet(ModelViewSet):
         })
 
 class SizeInfoViewSet(ModelViewSet):
+    """
+    ViewSet для работы с размерной информацией
+    Поддерживает фильтрацию, поиск, сортировку и опциональную пагинацию
+    """
     serializer_class = SizeInfoSerializer
-    filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['product', 'size']
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_class = SizeInfoFilter  # Используем кастомный фильтр
+    search_fields = ['size']  # Поиск по размеру
+    ordering_fields = ['size', 'chest', 'waist', 'length']  # Поля для сортировки
+    ordering = ['size']  # Сортировка по умолчанию
+    pagination_class = OptionalPagination  # Опциональная пагинация
 
     def get_queryset(self):
-        return SizeInfo.objects.all()
+        """
+        Возвращает queryset с оптимизацией
+        """
+        return SizeInfo.objects.all().select_related()
+
+    def get_pagination_params(self, request):
+        """
+        Извлекает параметры пагинации из запроса
+        """
+        try:
+            limit = int(request.query_params.get('limit', 20))
+            offset = int(request.query_params.get('offset', 0))
+
+            # Ограничиваем максимальный limit
+            if limit > 100:
+                limit = 100
+            elif limit <= 0:
+                limit = 20
+
+            if offset < 0:
+                offset = 0
+
+            return limit, offset
+        except (ValueError, TypeError):
+            return 20, 0
+
+    @swagger_auto_schema(
+        operation_description="Получить список размерной информации. Если не указаны параметры limit/offset - возвращает все записи без пагинации.",
+        manual_parameters=[
+            openapi.Parameter(
+                'limit',
+                openapi.IN_QUERY,
+                description="[ОПЦИОНАЛЬНО] Количество записей на странице (по умолчанию 20, максимум 100). Если не указан - возвращает все записи.",
+                type=openapi.TYPE_INTEGER,
+                required=False
+            ),
+            openapi.Parameter(
+                'offset',
+                openapi.IN_QUERY,
+                description="[ОПЦИОНАЛЬНО] Смещение от начала списка. Работает только вместе с limit.",
+                type=openapi.TYPE_INTEGER,
+                required=False
+            ),
+            openapi.Parameter(
+                'size',
+                openapi.IN_QUERY,
+                description="Фильтр по размеру (можно указать несколько через запятую)",
+                type=openapi.TYPE_STRING
+            ),
+            openapi.Parameter(
+                'chest_min',
+                openapi.IN_QUERY,
+                description="Минимальный обхват груди",
+                type=openapi.TYPE_INTEGER
+            ),
+            openapi.Parameter(
+                'chest_max',
+                openapi.IN_QUERY,
+                description="Максимальный обхват груди",
+                type=openapi.TYPE_INTEGER
+            ),
+            openapi.Parameter(
+                'waist_min',
+                openapi.IN_QUERY,
+                description="Минимальный обхват талии",
+                type=openapi.TYPE_INTEGER
+            ),
+            openapi.Parameter(
+                'waist_max',
+                openapi.IN_QUERY,
+                description="Максимальный обхват талии",
+                type=openapi.TYPE_INTEGER
+            ),
+            openapi.Parameter(
+                'length_min',
+                openapi.IN_QUERY,
+                description="Минимальная длина",
+                type=openapi.TYPE_INTEGER
+            ),
+            openapi.Parameter(
+                'length_max',
+                openapi.IN_QUERY,
+                description="Максимальная длина",
+                type=openapi.TYPE_INTEGER
+            ),
+            openapi.Parameter(
+                'search',
+                openapi.IN_QUERY,
+                description="Поиск по размеру",
+                type=openapi.TYPE_STRING
+            ),
+            openapi.Parameter(
+                'ordering',
+                openapi.IN_QUERY,
+                description="Сортировка (size, chest, waist, length). Для убывания добавьте '-'",
+                type=openapi.TYPE_STRING
+            ),
+        ],
+        responses={200: SizeInfoSerializer(many=True)}
+    )
+    def list(self, request, *args, **kwargs):
+        """
+        Получить список размерной информации с поддержкой:
+        - опциональной offset/limit пагинации
+        - фильтрации по всем полям
+        - поиска по размеру
+        - сортировки
+
+        Если не указаны параметры limit/offset - возвращает все записи
+        """
+        queryset = self.filter_queryset(self.get_queryset())
+
+        # Логируем параметры запроса для отладки
+        logger.info(f"SizeInfo list request - query_params: {dict(request.query_params)}")
+
+        # Пагинация работает автоматически через OptionalPagination
+        page = self.paginate_queryset(queryset)
+
+        if page is not None:
+            # Есть пагинация - возвращаем страницу
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        # Нет пагинации - возвращаем все записи
+        serializer = self.get_serializer(queryset, many=True)
+        return Response({
+            'count': queryset.count(),
+            'results': serializer.data
+        })
 
     @swagger_auto_schema(
         operation_description="Создать новую размерную информацию",
@@ -619,11 +822,41 @@ class SizeInfoViewSet(ModelViewSet):
     )
     @transaction.atomic
     def create(self, request, *args, **kwargs):
+        """
+        Создание новой размерной информации
+        """
         serializer = self.get_serializer(data=request.data)
         if serializer.is_valid():
-            size = serializer.save()
-            logger.info(f"Создана размерная информация: {size.size}")
+            size_info = serializer.save()
+            logger.info(f"Создана размерная информация: {size_info.size}")
             return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+        logger.warning(f"Ошибка валидации при создании размерной информации: {serializer.errors}")
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @swagger_auto_schema(
+        operation_description="Обновить размерную информацию",
+        request_body=SizeInfoSerializer,
+        responses={
+            200: SizeInfoSerializer,
+            400: 'Ошибка валидации',
+            404: 'Размерная информация не найдена'
+        }
+    )
+    def update(self, request, *args, **kwargs):
+        """
+        Обновление размерной информации
+        """
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+
+        if serializer.is_valid():
+            size_info = serializer.save()
+            logger.info(f"Обновлена размерная информация: {size_info.size}")
+            return Response(serializer.data)
+
+        logger.warning(f"Ошибка валидации при обновлении размерной информации: {serializer.errors}")
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 # Дополнительные утилитные views
@@ -668,3 +901,34 @@ class InventoryStatsView(generics.GenericAPIView):
         stats['total_stock_value'] = float(total_value)
 
         return Response(stats)
+
+
+
+from django.http import FileResponse, HttpResponseNotFound
+from django.views.decorators.csrf import csrf_exempt
+import os
+
+from .models import Product
+from django.conf import settings
+
+@csrf_exempt
+def product_label_proxy(request, pk):
+    """
+    Отдаёт картинку товара через прокси с CORS-заголовками
+    """
+    try:
+        product = Product.objects.get(pk=pk)
+    except Product.DoesNotExist:
+        return HttpResponseNotFound("Product not found")
+
+    if not product.image_label:
+        return HttpResponseNotFound("Image not found")
+
+    file_path = os.path.join(settings.MEDIA_ROOT, str(product.image_label))
+
+    if not os.path.exists(file_path):
+        return HttpResponseNotFound("File not found")
+
+    response = FileResponse(open(file_path, "rb"), content_type="image/png")
+    response["Access-Control-Allow-Origin"] = "*"   # 🔑 главное!
+    return response
