@@ -300,15 +300,27 @@ class ProductViewSet(StoreViewSetMixin, ModelViewSet):
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
-        """Создание товара с автоматической привязкой к магазину из токена"""
+        """✅ ИСПРАВЛЕННОЕ создание товара с правильной последовательностью"""
         barcode = request.data.get('barcode')
         batch_info = request.data.pop('batch_info', {})
         size_id = request.data.pop('size_id', None)
 
+        # Получаем текущий магазин
+        current_store = self.get_current_store() if hasattr(self, 'get_current_store') else getattr(request.user, 'current_store', None)
+        
+        if not current_store:
+            return Response({
+                'error': 'Магазин не определен. Переавторизуйтесь.',
+                'debug_info': {
+                    'user': request.user.username,
+                    'has_current_store': hasattr(request.user, 'current_store')
+                }
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         # Проверяем существование товара по штрих-коду В ТЕКУЩЕМ МАГАЗИНЕ
-        if barcode and hasattr(request.user, 'current_store'):
+        if barcode:
             existing_product = Product.objects.filter(
-                store=request.user.current_store,  # ← ДОБАВИТЬ фильтр по магазину
+                store=current_store,
                 barcode=barcode
             ).first()
 
@@ -321,11 +333,12 @@ class ProductViewSet(StoreViewSetMixin, ModelViewSet):
                     }
                     batch_serializer = ProductBatchSerializer(
                         data=batch_data,
-                        context={'request': request}  # ← ДОБАВИТЬ context
+                        context={'request': request}
                     )
                     if batch_serializer.is_valid():
-                        batch_serializer.save(store=request.user.current_store)  # ← ДОБАВИТЬ store
-                        logger.info(f"Добавлена партия для товара {existing_product.name}")
+                        # perform_create в StoreViewSetMixin автоматически добавит store
+                        self.perform_create(batch_serializer)
+                        logger.info(f"✅ Batch added to existing product {existing_product.name}")
                     else:
                         return Response(
                             {'batch_errors': batch_serializer.errors},
@@ -339,54 +352,79 @@ class ProductViewSet(StoreViewSetMixin, ModelViewSet):
                     'action': 'batch_added'
                 }, status=status.HTTP_200_OK)
 
-        # Создаем новый товар
+        # ✅ СОЗДАЕМ НОВЫЙ ТОВАР - ПРАВИЛЬНАЯ ПОСЛЕДОВАТЕЛЬНОСТЬ
+        
+        # 1. Валидируем данные
         serializer = self.get_serializer(data=request.data)
-        if serializer.is_valid():
-            # perform_create теперь в миксине добавляет store автоматически
-            self.perform_create(serializer)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-            # Обрабатываем size
-            if size_id:
-                try:
-                    size_instance = SizeInfo.objects.get(id=size_id)
-                    product.size = size_instance
-                    product.save()
-                    logger.info(f"Добавлен размер {size_instance.size} для товара {product.name}")
-                except SizeInfo.DoesNotExist:
-                    return Response(
-                        {'size_error': _('Размерная информация не найдена')},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
+        # 2. Создаем товар через perform_create (установит store автоматически)
+        self.perform_create(serializer)
+        product = serializer.instance
+        
+        # 3. Теперь у product есть store, можем создать Stock вручную если нужно
+        if not hasattr(product, 'stock'):
+            try:
+                Stock.objects.create(
+                    product=product,
+                    store=product.store,  # ← Теперь у product точно есть store
+                    quantity=0
+                )
+                logger.info(f"✅ Stock manually created for {product.name}")
+            except Exception as e:
+                logger.error(f"❌ Error creating stock: {str(e)}")
 
-            # Создаем партию если указана
-            if batch_info:
-                batch_data = {
-                    'product': product.id,
-                    **batch_info
-                }
-                batch_serializer = ProductBatchSerializer(data=batch_data)
-                if batch_serializer.is_valid():
-                    batch_serializer.save()
-                    logger.info(f"Создана партия для нового товара {product.name}")
-                else:
-                    return Response(
-                        {'batch_errors': batch_serializer.errors},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
+        # 4. Обрабатываем размер
+        if size_id:
+            try:
+                size_instance = SizeInfo.objects.get(id=size_id)
+                product.size = size_instance
+                product.save()
+                logger.info(f"✅ Size {size_instance.size} set for {product.name}")
+            except SizeInfo.DoesNotExist:
+                return Response(
+                    {'size_error': _('Размерная информация не найдена')},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
-            # Генерируем комбинированное изображение после создания
+        # 5. Создаем партию если указана
+        if batch_info:
+            batch_data = {
+                'product': product.id,
+                **batch_info
+            }
+            batch_serializer = ProductBatchSerializer(
+                data=batch_data,
+                context={'request': request}
+            )
+            if batch_serializer.is_valid():
+                # perform_create добавит store к batch автоматически
+                batch_viewset = ProductBatchViewSet()
+                batch_viewset.request = request
+                batch_viewset.perform_create(batch_serializer)
+                logger.info(f"✅ Batch created for new product {product.name}")
+            else:
+                return Response(
+                    {'batch_errors': batch_serializer.errors},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        # 6. Генерируем этикетку
+        try:
             product.generate_label()
+            logger.info(f"✅ Label generated for {product.name}")
+        except Exception as e:
+            logger.error(f"⚠️ Label generation failed: {str(e)}")
 
-            # Возвращаем обновленные данные
-            updated_serializer = self.get_serializer(product)
-            return Response({
-                'product': serializer.data,
-                'message': _('Товар успешно создан'),
-                'action': 'product_created'
-            }, status=status.HTTP_201_CREATED)
-
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
+        # 7. Возвращаем результат
+        updated_serializer = self.get_serializer(product)
+        return Response({
+            'product': updated_serializer.data,
+            'message': _('Товар успешно создан'),
+            'action': 'product_created'
+        }, status=status.HTTP_201_CREATED)
+    
     @transaction.atomic
     def update(self, request, *args, **kwargs):
         """

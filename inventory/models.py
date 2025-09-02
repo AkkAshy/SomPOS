@@ -471,10 +471,51 @@ class Stock(StoreOwnedModel):
 
 @receiver(post_save, sender=Product)
 def create_product_stock(sender, instance, created, **kwargs):
+    """
+    Создаем Stock ТОЛЬКО после того как Product полностью сохранен со store
+    """
     if created and not hasattr(instance, 'stock'):
-        Stock.objects.create(product=instance)
-        logger.info(f"Создан остаток для товара: {instance.name}")
+        # ✅ ВАЖНО: Проверяем что у Product есть store
+        if hasattr(instance, 'store') and instance.store:
+            try:
+                stock, stock_created = Stock.objects.get_or_create(
+                    product=instance,
+                    defaults={
+                        'store': instance.store,  # ← Берем store из Product
+                        'quantity': 0
+                    }
+                )
+                if stock_created:
+                    logger.info(f"✅ Stock created for product: {instance.name} in store: {instance.store.name}")
+                else:
+                    logger.info(f"ℹ️ Stock already exists for product: {instance.name}")
+            except Exception as e:
+                logger.error(f"❌ Error creating stock for product {instance.name}: {str(e)}")
+        else:
+            logger.warning(f"⚠️ Cannot create stock for product {instance.name}: no store assigned")
 
 @receiver(post_save, sender=ProductBatch)
 def update_stock_on_batch_change(sender, instance, **kwargs):
-    instance.product.stock.update_quantity()
+    """
+    Обновляем остатки при изменении партии
+    """
+    try:
+        # Получаем или создаем Stock для продукта
+        stock, created = Stock.objects.get_or_create(
+            product=instance.product,
+            defaults={
+                'store': instance.store,  # ← Берем store из ProductBatch
+                'quantity': 0
+            }
+        )
+        
+        # Обновляем количество
+        stock.update_quantity()
+        
+        if created:
+            logger.info(f"✅ Stock created during batch update for: {instance.product.name}")
+        else:
+            logger.debug(f"✅ Stock updated for: {instance.product.name}")
+            
+    except Exception as e:
+        logger.error(f"❌ Error updating stock for batch {instance.id}: {str(e)}")

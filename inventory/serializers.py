@@ -127,7 +127,7 @@ class ProductBatchSerializer(serializers.ModelSerializer):
 
 class ProductSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source='category.name', read_only=True)
-    size = SizeInfoSerializer(read_only=True)  # Убираем many=True
+    size = SizeInfoSerializer(read_only=True)
     current_stock = serializers.IntegerField(
         source='stock.quantity',
         read_only=True,
@@ -138,7 +138,7 @@ class ProductSerializer(serializers.ModelSerializer):
         queryset=SizeInfo.objects.all(),
         write_only=True,
         required=False,
-        allow_null=True  # Разрешаем null, так как size может быть пустым
+        allow_null=True
     )
     unit = serializers.ChoiceField(
         choices=Product.UNIT_CHOICES,
@@ -187,8 +187,6 @@ class ProductSerializer(serializers.ModelSerializer):
             )
         return round(value, 2)
 
-
-
     def validate_barcode(self, value):
         if not value:
             return value
@@ -206,47 +204,47 @@ class ProductSerializer(serializers.ModelSerializer):
                 code='barcode_too_long'
             )
 
-        if Product.objects.filter(barcode=value) \
-           .exclude(pk=self.instance.pk if self.instance else None) \
-           .exists():
-            raise serializers.ValidationError(
-                _("Товар с таким штрихкодом уже существует"),
-                code='duplicate_barcode'
+        # ✅ ИСПРАВЛЕНО: Проверяем уникальность с учетом магазина
+        request = self.context.get('request')
+        if request and hasattr(request.user, 'current_store') and request.user.current_store:
+            existing_query = Product.objects.filter(
+                store=request.user.current_store,  # ← Фильтр по магазину
+                barcode=value
             )
+            
+            if self.instance:
+                existing_query = existing_query.exclude(pk=self.instance.pk)
+            
+            if existing_query.exists():
+                raise serializers.ValidationError(
+                    _("Товар с таким штрихкодом уже существует в этом магазине"),
+                    code='duplicate_barcode'
+                )
 
         return value
 
     def create(self, validated_data):
         """
-        Создание товара с правильной обработкой размера
+        ✅ ИСПРАВЛЕННОЕ создание товара - НЕ ТРОГАЕМ СИГНАЛЫ
         """
-        validated_data.pop('created_by', None)  # Убираем created_by из validated_data
-        size = validated_data.pop('size', None)  # Извлекаем размер
-
-        user = self.context['request'].user
-
-        # Создаем товар БЕЗ размера
-        product = Product.objects.create(created_by=user, **validated_data)
-
-        # Устанавливаем размер ПОСЛЕ создания
-        if size:
-            product.size = size
-            product.save()
-            print(f"DEBUG: Размер {size} установлен для товара {product.name}")  # Отладка
-        else:
-            print(f"DEBUG: Размер не передан для товара {product.name}")  # Отладка
-
+        size = validated_data.pop('size', None)
+        
+        # ✅ ВАЖНО: НЕ устанавливаем created_by здесь - это сделает StoreViewSetMixin
+        # ✅ ВАЖНО: НЕ устанавливаем store здесь - это сделает StoreViewSetMixin
+        
+        # Создаем товар БЕЗ store и created_by - их установит миксин в perform_create
+        product = Product(**validated_data)
+        
+        # НЕ СОХРАНЯЕМ ЕЩЕ! Пусть StoreViewSetMixin.perform_create сохранит с store
         return product
-
 
     def update(self, instance, validated_data):
         size = validated_data.pop('size', None)
         product = super().update(instance, validated_data)
         if size is not None:
-            product.size = size  # Прямое присваивание для ForeignKey
+            product.size = size
             product.save()
         return product
-
 
 class StockSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(
@@ -288,7 +286,7 @@ class ProductMultiSizeCreateSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=255)
     category = serializers.PrimaryKeyRelatedField(queryset=ProductCategory.objects.all())
     sale_price = serializers.DecimalField(max_digits=12, decimal_places=2)
-    unit = serializers.CharField(max_length=50)
+    unit = serializers.CharField(max_length=50, default='piece')
     batch_info = serializers.ListField(
         child=serializers.DictField(),
         required=False,
@@ -319,58 +317,135 @@ class ProductMultiSizeCreateSerializer(serializers.Serializer):
 
         return value
 
-    def save(self, **kwargs):
-        created_by = kwargs.get('created_by')
+    def create(self, validated_data):
+        """
+        ✅ ИСПРАВЛЕННОЕ создание множественных товаров
+        """
+        # Извлекаем необходимые данные
+        store = validated_data.get('store')  # Передается из view
+        created_by = validated_data.get('created_by')  # Передается из view
+        
+        if not store:
+            raise serializers.ValidationError("Store is required")
         if not created_by:
             raise serializers.ValidationError("created_by is required")
 
-        validated_data = self.validated_data
         batch_info = validated_data.get('batch_info', [])
+        
+        if not batch_info:
+            raise serializers.ValidationError("batch_info с размерами обязателен")
 
         created_products = []
-
+        
         # Извлекаем уникальные размеры из batch_info
         size_ids = list(set(batch['size_id'] for batch in batch_info))
 
-        if not size_ids:
-            raise serializers.ValidationError("Необходимо указать хотя бы один размер в batch_info")
+        try:
+            with transaction.atomic():
+                for size_id in size_ids:
+                    try:
+                        # Получаем размер
+                        size_instance = SizeInfo.objects.get(id=size_id)
+                        
+                        # Создаем имя товара с размером
+                        product_name = f"{validated_data['name']} - {size_instance.size}"
+                        
+                        # Генерируем уникальный штрих-код
+                        unique_barcode = self.generate_unique_barcode(store)
+                        
+                        # ✅ Создаем товар СРАЗУ с store
+                        product = Product.objects.create(
+                            name=product_name,
+                            barcode=unique_barcode,
+                            created_by=created_by,
+                            category=validated_data['category'],
+                            sale_price=validated_data['sale_price'],
+                            unit=validated_data.get('unit', 'piece'),
+                            size=size_instance,
+                            store=store  # ← ВАЖНО: устанавливаем store сразу
+                        )
+                        
+                        logger.info(f"✅ Multi-size product created: {product.name} in store {store.name}")
 
-        for size_id in size_ids:
-            try:
-                size_instance = SizeInfo.objects.get(id=size_id)
-                product_name = f"{validated_data['name']} - {size_instance.size}"
-                unique_barcode = self.generate_unique_barcode()
+                        # ✅ Создаем Stock вручную с правильным store
+                        Stock.objects.get_or_create(
+                            product=product,
+                            defaults={
+                                'store': store,
+                                'quantity': 0
+                            }
+                        )
+                        logger.info(f"✅ Stock created for multi-size product: {product.name}")
 
-                # Создаем товар
-                product = Product.objects.create(
-                    name=product_name,
-                    barcode=unique_barcode,
-                    created_by=created_by,
-                    category=validated_data['category'],
-                    sale_price=validated_data['sale_price'],
-                    unit=validated_data['unit'],
-                    size=size_instance
-                )
+                        # Создаем batch для этого размера
+                        batch_for_size = next((b for b in batch_info if b['size_id'] == size_id), None)
+                        if batch_for_size:
+                            batch = ProductBatch.objects.create(
+                                product=product,
+                                store=store,  # ← ВАЖНО: устанавливаем store
+                                quantity=batch_for_size['quantity'],
+                                purchase_price=batch_for_size['purchase_price'],
+                                supplier=batch_for_size['supplier'],
+                                expiration_date=batch_for_size.get('expiration_date')
+                            )
+                            logger.info(f"✅ Batch created for multi-size product: {product.name}")
+                            
+                            # Обновляем количество в Stock
+                            product.stock.update_quantity()
 
-                # Создаем batch для этого размера
-                batch_for_size = next((b for b in batch_info if b['size_id'] == size_id), None)
-                if batch_for_size:
-                    ProductBatch.objects.create(
-                        product=product,
-                        quantity=batch_for_size['quantity'],
-                        purchase_price=batch_for_size['purchase_price'],
-                        supplier=batch_for_size['supplier'],
-                        expiration_date=batch_for_size.get('expiration_date')
-                    )
+                        # Генерируем этикетку
+                        try:
+                            product.generate_label()
+                            logger.info(f"✅ Label generated for multi-size product: {product.name}")
+                        except Exception as e:
+                            logger.error(f"⚠️ Label generation failed for {product.name}: {str(e)}")
 
-                product.generate_label()
-                created_products.append(product)
+                        created_products.append(product)
 
-            except SizeInfo.DoesNotExist:
-                raise serializers.ValidationError(f"Размер с ID {size_id} не найден")
+                    except SizeInfo.DoesNotExist:
+                        logger.error(f"❌ Size with ID {size_id} not found")
+                        raise serializers.ValidationError(f"Размер с ID {size_id} не найден")
+                    except Exception as e:
+                        logger.error(f"❌ Error creating product for size {size_id}: {str(e)}")
+                        raise
 
+        except Exception as e:
+            logger.error(f"❌ Transaction failed in multi-size creation: {str(e)}")
+            raise
+
+        logger.info(f"✅ Successfully created {len(created_products)} multi-size products")
         return created_products
 
-    def generate_unique_barcode(self):
+    def generate_unique_barcode(self, store):
+        """Генерирует уникальный штрих-код для конкретного магазина"""
         import uuid
+        import random
+        import time
+        
+        max_attempts = 100
+        attempts = 0
+
+        while attempts < max_attempts:
+            # Генерируем на основе времени и случайных чисел
+            timestamp = str(int(time.time()))[-6:]
+            random_part = str(random.randint(100000, 999999))
+            barcode_code = timestamp + random_part
+            
+            # Добавляем контрольную сумму
+            checksum = self._calculate_ean13_checksum(barcode_code)
+            full_barcode = barcode_code + checksum
+            
+            # Проверяем уникальность В ПРЕДЕЛАХ МАГАЗИНА
+            if not Product.objects.filter(store=store, barcode=full_barcode).exists():
+                return full_barcode
+                
+            attempts += 1
+
+        # Fallback - используем UUID
         return str(uuid.uuid4().int)[:12]
+
+    def _calculate_ean13_checksum(self, digits):
+        """Вычисляет контрольную цифру EAN-13"""
+        weights = [1, 3] * 6
+        total = sum(int(d) * w for d, w in zip(digits, weights))
+        return str((10 - (total % 10)) % 10)

@@ -4,7 +4,7 @@ from rest_framework.routers import DefaultRouter
 from django.http import JsonResponse
 from .views import (
     StoreViewSet, CreateUserForStoreView, SwitchStoreView,
-    simple_store_register, simple_refresh_token
+    simple_store_register, simple_refresh_token, DebugTokenView
 )
 
 # Отладочный view
@@ -37,6 +37,8 @@ urlpatterns = [
     # ✅ ПРОСТЫЕ функции без DRF (без аутентификации)
     path('register/', simple_store_register, name='simple-store-register'),
     path('refresh-token/', simple_refresh_token, name='simple-refresh-token'),
+
+    path('debug-token/', DebugTokenView.as_view(), name='debug-token'),
 
     # ✅ DRF views (с аутентификацией)
     path('switch-store/', SwitchStoreView.as_view(), name='switch-store'),

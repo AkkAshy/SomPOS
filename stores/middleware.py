@@ -1,7 +1,7 @@
-# stores/middleware.py (ОТЛАДОЧНАЯ ВЕРСИЯ)
+# stores/middleware.py (ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ ВЕРСИЯ)
 from django.utils.deprecation import MiddlewareMixin
 from rest_framework_simplejwt.authentication import JWTAuthentication
-from rest_framework_simplejwt.exceptions import InvalidToken
+from django.contrib.auth.models import AnonymousUser
 from .models import StoreEmployee, Store
 import logging
 
@@ -12,16 +12,14 @@ class CurrentStoreMiddleware(MiddlewareMixin):
     Middleware для установки текущего магазина пользователя из JWT токена
     """
     def process_request(self, request):
-        # ✅ ОТЛАДКА: логируем все запросы
-        logger.info(f"CurrentStoreMiddleware: Processing {request.method} {request.path}")
-        logger.info(f"User: {request.user}, Authenticated: {request.user.is_authenticated if hasattr(request.user, 'is_authenticated') else 'N/A'}")
+        logger.debug(f"🔍 Processing {request.method} {request.path}")
         
-        # ✅ ВАЖНО: Пропускаем публичные endpoints СРАЗУ
+        # Пропускаем публичные endpoints
         public_paths = [
             '/api/stores/register/',
             '/api/stores/refresh-token/', 
-            '/api/users/login/',
-            '/api/users/register/',
+            '/users/login/',
+            '/users/register/',
             '/admin/',
             '/swagger/',
             '/redoc/',
@@ -30,86 +28,103 @@ class CurrentStoreMiddleware(MiddlewareMixin):
         ]
         
         if any(request.path.startswith(path) for path in public_paths):
-            logger.info(f"Skipping middleware for public path: {request.path}")
+            logger.debug(f"⏭️ Skipping public path: {request.path}")
             return None
         
-        # ✅ ПРОПУСКАЕМ неаутентифицированных пользователей
-        if not hasattr(request, 'user') or not request.user or not request.user.is_authenticated:
-            logger.info("User not authenticated, skipping store setup")
+        # Инициализируем атрибуты магазина
+        if not hasattr(request.user, 'current_store'):
+            request.user.current_store = None
+            request.user.store_role = None
+            request.user.store_id = None
+        
+        # Если пользователь не аутентифицирован, пропускаем
+        if isinstance(request.user, AnonymousUser) or not request.user.is_authenticated:
+            logger.debug("👤 User not authenticated, skipping store setup")
             return None
+        
+        try:
+            # Пытаемся получить JWT токен и извлечь store_id
+            jwt_auth = JWTAuthentication()
+            auth_result = jwt_auth.authenticate(request)
             
-        store_id = None
-        store_role = None
-        
-        # Пытаемся получить магазин из JWT токена
-        auth_header = request.META.get('HTTP_AUTHORIZATION', '')
-        if auth_header.startswith('Bearer '):
-            token = auth_header.split(' ')[1]
-            try:
-                # Декодируем токен
-                from rest_framework_simplejwt.tokens import AccessToken
-                decoded_token = AccessToken(token)
+            if auth_result:
+                authenticated_user, validated_token = auth_result
                 
-                # Извлекаем store_id из токена
-                store_id = decoded_token.get('store_id')
-                store_role = decoded_token.get('store_role')
+                # Обновляем request.user если нужно
+                if request.user != authenticated_user:
+                    request.user = authenticated_user
                 
-                logger.debug(f"Store ID from JWT token: {store_id}, Role: {store_role}")
+                # Извлекаем данные магазина из токена
+                store_id = validated_token.get('store_id')
+                store_role = validated_token.get('store_role')
                 
-            except Exception as e:
-                logger.debug(f"Failed to decode JWT token: {e}")
-        
-        # Если в токене нет store_id, проверяем сессию (для веб-интерфейса)
-        if not store_id:
-            store_id = request.session.get('current_store_id')
-            logger.debug(f"Store ID from session: {store_id}")
-        
-        # Устанавливаем текущий магазин
-        if store_id:
-            try:
-                # Получаем магазин напрямую
-                store = Store.objects.get(id=store_id, is_active=True)
+                logger.debug(f"🏪 Token store_id: {store_id}, role: {store_role}")
                 
-                # Проверяем, что пользователь имеет доступ
+                if store_id:
+                    try:
+                        # Получаем магазин и проверяем доступ
+                        store = Store.objects.get(id=store_id, is_active=True)
+                        store_membership = StoreEmployee.objects.filter(
+                            user=request.user,
+                            store=store,
+                            is_active=True
+                        ).first()
+                        
+                        if store_membership:
+                            # ✅ Устанавливаем атрибуты магазина
+                            request.user.current_store = store
+                            request.user.store_role = store_membership.role
+                            request.user.store_id = str(store.id)
+                            
+                            logger.info(f"✅ Store set: {store.name} for {request.user.username} ({store_membership.role})")
+                            return None
+                        else:
+                            logger.warning(f"⚠️ User {request.user.username} has no access to store {store_id}")
+                    
+                    except Store.DoesNotExist:
+                        logger.error(f"❌ Store {store_id} not found")
+                
+                # Если магазин из токена не найден, берем первый доступный
                 store_membership = StoreEmployee.objects.filter(
                     user=request.user,
-                    store=store,
                     is_active=True
-                ).first()
+                ).select_related('store').first()
                 
                 if store_membership:
-                    request.user.current_store = store
+                    request.user.current_store = store_membership.store
                     request.user.store_role = store_membership.role
-                    request.user.store_id = str(store.id)
-                    logger.debug(f"Set current store: {store.name} for user {request.user.username}")
-                else:
-                    logger.warning(f"User {request.user.username} has no access to store {store_id}")
-                    request.user.current_store = None
-                    request.user.store_role = None
-                    request.user.store_id = None
+                    request.user.store_id = str(store_membership.store.id)
                     
-            except Store.DoesNotExist:
-                logger.error(f"Store {store_id} not found")
-                request.user.current_store = None
-                request.user.store_role = None
-                request.user.store_id = None
-        else:
-            # Если магазин не указан в токене, берем первый доступный
-            store_membership = StoreEmployee.objects.filter(
-                user=request.user,
-                is_active=True
-            ).select_related('store').first()
+                    logger.info(f"✅ Default store set: {store_membership.store.name}")
+                else:
+                    logger.warning(f"⚠️ No stores found for user {request.user.username}")
             
-            if store_membership:
-                request.user.current_store = store_membership.store
-                request.user.store_role = store_membership.role
-                request.user.store_id = str(store_membership.store.id)
-                request.session['current_store_id'] = str(store_membership.store.id)
-                logger.debug(f"Set default store: {store_membership.store.name} for user {request.user.username}")
             else:
-                logger.debug(f"User {request.user.username} has no store memberships")
-                request.user.current_store = None
-                request.user.store_role = None
-                request.user.store_id = None
+                # JWT не найден, но пользователь аутентифицирован (возможно через сессию)
+                logger.debug("🔑 No JWT token, trying session-based store")
+                
+                store_membership = StoreEmployee.objects.filter(
+                    user=request.user,
+                    is_active=True
+                ).select_related('store').first()
+                
+                if store_membership:
+                    request.user.current_store = store_membership.store
+                    request.user.store_role = store_membership.role
+                    request.user.store_id = str(store_membership.store.id)
+                    
+                    logger.info(f"✅ Session store set: {store_membership.store.name}")
+        
+        except Exception as e:
+            logger.error(f"❌ Error in store middleware: {str(e)}")
+            # Не прерываем запрос, просто логируем ошибку
         
         return None
+
+    def process_response(self, request, response):
+        # Логируем финальное состояние для отладки
+        if hasattr(request, 'user') and hasattr(request.user, 'current_store'):
+            store_name = request.user.current_store.name if request.user.current_store else None
+            logger.debug(f"🏁 Final store for {request.path}: {store_name}")
+        
+        return response
