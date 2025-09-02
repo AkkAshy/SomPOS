@@ -17,9 +17,10 @@ from io import BytesIO
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.fonts import addMapping
+from stores.mixins import StoreOwnedModel, StoreOwnedManager
 
 
-pdfmetrics.registerFont(TTFont('DejaVuSans', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'))
+pdfmetrics.registerFont(TTFont('Arial', r'C:\Windows\Fonts\arial.ttf'))
 addMapping('DejaVuSans', 0, 0, 'DejaVuSans')
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('inventory')
@@ -67,14 +68,15 @@ class SizeInfo(models.Model):
         return f"{self.size}"
 
 
-class ProductCategory(models.Model):
+class ProductCategory(StoreOwnedModel):
     name = models.CharField(max_length=255, unique=True, verbose_name="Название")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Дата создания")
-
+    objects = StoreOwnedManager()
     class Meta:
         verbose_name = "Категория товара"
         verbose_name_plural = "Категории товаров"
         ordering = ['name']
+        unique_together = ['store', 'name']
 
     def __str__(self):
         return self.name
@@ -115,7 +117,7 @@ class AttributeValue(models.Model):
     def __str__(self):
         return f"{self.attribute_type.name}: {self.value} ({self.slug})"
 
-class Product(models.Model):
+class Product(StoreOwnedModel):
     UNIT_CHOICES = [
         ('piece', 'Штука')
     ]
@@ -174,6 +176,7 @@ class Product(models.Model):
         related_name='products_created',
         verbose_name="Создан пользователем"
     )
+    objects = StoreOwnedManager()
 
     @classmethod
     def generate_unique_barcode(cls):
@@ -318,7 +321,10 @@ class Product(models.Model):
         verbose_name_plural = "Товары"
         indexes = [
             models.Index(fields=['name', 'barcode']),
+            models.Index(fields=['store', 'name']),  # ← ДОБАВИТЬ
+            models.Index(fields=['store', 'barcode']),  # ← ДОБАВИТЬ
         ]
+        unique_together = ['store', 'barcode']
 
 
 class ProductAttribute(models.Model):
@@ -358,7 +364,7 @@ class SizeChart(models.Model):
 
 
 
-class ProductBatch(models.Model):
+class ProductBatch(StoreOwnedModel):
     product = models.ForeignKey(
         Product,
         on_delete=models.CASCADE,
@@ -385,6 +391,7 @@ class ProductBatch(models.Model):
     supplier = models.CharField(max_length=255, blank=True, null=True,  verbose_name="Поставщик")
     expiration_date = models.DateField(null=True, blank=True, verbose_name="Дата истечения")
     created_at = models.DateTimeField(auto_now_add=True)
+    objects = StoreOwnedManager()
 
     class Meta:
         verbose_name = "Партия товара"
@@ -409,7 +416,7 @@ class ProductBatch(models.Model):
     def __str__(self):
         return f"{self.product.name} × {self.quantity} (поставщик: {self.supplier})"
 
-class Stock(models.Model):
+class Stock(StoreOwnedModel):
     product = models.OneToOneField(
         Product,
         on_delete=models.CASCADE,
@@ -422,7 +429,7 @@ class Stock(models.Model):
         verbose_name="Количество"
     )
     updated_at = models.DateTimeField(auto_now=True)
-
+    objects = StoreOwnedManager()
     class Meta:
         verbose_name = "Остаток на складе"
         verbose_name_plural = "Остатки на складе"

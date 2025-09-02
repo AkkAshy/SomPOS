@@ -4,10 +4,11 @@ from django.core.validators import MinValueValidator
 from django.contrib.auth.models import User
 from inventory.models import Product, Stock
 import logging
+from stores.mixins import StoreOwnedModel, StoreOwnedManager
 
 logger = logging.getLogger('sales')
 
-class Transaction(models.Model):
+class Transaction(StoreOwnedModel):
     PAYMENT_METHODS = [
         ('cash', 'Наличные'),
         ('transfer', 'Перевод'),
@@ -45,10 +46,15 @@ class Transaction(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
+    objects = StoreOwnedManager()  # ← ДОБАВИТЬ после полей
+
     class Meta:
         verbose_name = "Продажа"
         verbose_name_plural = "Продажи"
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['store', 'created_at']),  # ← ДОБАВИТЬ
+        ]
 
     def __str__(self):
         return f"Продажа #{self.id} от {self.created_at}"
@@ -79,7 +85,7 @@ class Transaction(models.Model):
         self.save(update_fields=['status'])
         logger.info(f"Продажа #{self.id} завершена: {self.total_amount} ({self.payment_method})")
 
-class TransactionItem(models.Model):
+class TransactionItem(StoreOwnedModel):
     transaction = models.ForeignKey(
         Transaction,
         on_delete=models.CASCADE,
@@ -98,6 +104,7 @@ class TransactionItem(models.Model):
         decimal_places=2,
         validators=[MinValueValidator(0)]
     )
+    objects = StoreOwnedManager()
 
     class Meta:
         verbose_name = "Элемент продажи"
@@ -106,7 +113,7 @@ class TransactionItem(models.Model):
     def __str__(self):
         return f"{self.product.name} × {self.quantity} в продаже #{self.transaction.id}"
 
-class TransactionHistory(models.Model):
+class TransactionHistory(StoreOwnedModel):
     transaction = models.ForeignKey(
         Transaction,
         on_delete=models.CASCADE,
@@ -119,6 +126,7 @@ class TransactionHistory(models.Model):
     details = models.TextField()  # JSON или текст с информацией
     created_at = models.DateTimeField(auto_now_add=True)
 
+    objects = StoreOwnedManager()
     class Meta:
         verbose_name = "История продажи"
         verbose_name_plural = "История продаж"

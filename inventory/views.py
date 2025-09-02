@@ -16,6 +16,7 @@ import logging
 from django.core.exceptions import ValidationError
 from rest_framework import pagination
 from .pagination import OptionalPagination
+from stores.mixins import StoreViewSetMixin, StorePermissionMixin
 
 from customers.views import FlexiblePagination
 
@@ -73,7 +74,7 @@ class SizeInfoPagination(LimitOffsetPagination):
 
 
 
-class ProductCategoryViewSet(ModelViewSet):
+class ProductCategoryViewSet(StoreViewSetMixin, ModelViewSet):
     """
     ViewSet для управления категориями товаров
     """
@@ -89,8 +90,8 @@ class ProductCategoryViewSet(ModelViewSet):
         operation_description="Получить все категории товаров",
         responses={200: ProductCategorySerializer(many=True)}
     )
-    def list(self, request, *args, **kwargs):
-        return super().list(request, *args, **kwargs)
+    # def list(self, request, *args, **kwargs):
+    #     return super().list(request, *args, **kwargs)
 
     @swagger_auto_schema(
         operation_description="Создать новую категорию товара",
@@ -100,8 +101,8 @@ class ProductCategoryViewSet(ModelViewSet):
             400: 'Ошибка валидации'
         }
     )
-    def create(self, request, *args, **kwargs):
-        return super().create(request, *args, **kwargs)
+    # def create(self, request, *args, **kwargs):
+    #     return super().create(request, *args, **kwargs)
 
 
 class AttributeTypeViewSet(ModelViewSet):
@@ -148,7 +149,7 @@ class AttributeValueViewSet(ModelViewSet):
 
 
 
-class ProductViewSet(ModelViewSet):
+class ProductViewSet(StoreViewSetMixin, ModelViewSet):
     pagination_class = FlexiblePagination
     serializer_class = ProductSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
@@ -308,29 +309,31 @@ class ProductViewSet(ModelViewSet):
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
-        """
-        Создание товара с логикой:
-        1. Если штрих-код существует - добавляем партию
-        2. Если нет - создаем новый товар
-        3. Обрабатываем size для связи с существующей размерной информацией
-        """
+        """Создание товара с автоматической привязкой к магазину из токена"""
         barcode = request.data.get('barcode')
         batch_info = request.data.pop('batch_info', {})
-        size_id = request.data.pop('size_id', None)  # Извлекаем size_id
+        size_id = request.data.pop('size_id', None)
 
-        # Проверяем существование товара по штрих-коду
-        if barcode:
-            try:
-                existing_product = Product.objects.get(barcode=barcode)
+        # Проверяем существование товара по штрих-коду В ТЕКУЩЕМ МАГАЗИНЕ
+        if barcode and hasattr(request.user, 'current_store'):
+            existing_product = Product.objects.filter(
+                store=request.user.current_store,  # ← ДОБАВИТЬ фильтр по магазину
+                barcode=barcode
+            ).first()
+
+            if existing_product:
                 # Товар существует - добавляем партию
                 if batch_info:
                     batch_data = {
                         'product': existing_product.id,
                         **batch_info
                     }
-                    batch_serializer = ProductBatchSerializer(data=batch_data)
+                    batch_serializer = ProductBatchSerializer(
+                        data=batch_data,
+                        context={'request': request}  # ← ДОБАВИТЬ context
+                    )
                     if batch_serializer.is_valid():
-                        batch_serializer.save()
+                        batch_serializer.save(store=request.user.current_store)  # ← ДОБАВИТЬ store
                         logger.info(f"Добавлена партия для товара {existing_product.name}")
                     else:
                         return Response(
@@ -338,39 +341,18 @@ class ProductViewSet(ModelViewSet):
                             status=status.HTTP_400_BAD_REQUEST
                         )
 
-                # Обрабатываем size для существующего товара
-                if size_id:
-                    try:
-                        size_instance = SizeInfo.objects.get(id=size_id)
-                        existing_product.size = size_instance
-                        existing_product.save()
-                        logger.info(f"Добавлен размер {size_instance.size} для товара {existing_product.name}")
-                    except SizeInfo.DoesNotExist:
-                        return Response(
-                            {'size_error': _('Размерная информация не найдена')},
-                            status=status.HTTP_400_BAD_REQUEST
-                        )
-
-                # Генерируем комбинированное изображение после обновления
-                existing_product.generate_label()
-
                 serializer = self.get_serializer(existing_product)
                 return Response({
                     'product': serializer.data,
-                    'message': _('Партия и/или размер добавлены к существующему товару'),
+                    'message': _('Партия добавлена к существующему товару'),
                     'action': 'batch_added'
                 }, status=status.HTTP_200_OK)
-
-            except Product.DoesNotExist:
-                pass  # Товар не найден, создаем новый
 
         # Создаем новый товар
         serializer = self.get_serializer(data=request.data)
         if serializer.is_valid():
-            try:
-                product = serializer.save(created_by=request.user)
-            except ValidationError as e:
-                return Response({'errors': e.message_dict}, status=status.HTTP_400_BAD_REQUEST)
+            # perform_create теперь в миксине добавляет store автоматически
+            self.perform_create(serializer)
 
             # Обрабатываем size
             if size_id:
@@ -407,7 +389,7 @@ class ProductViewSet(ModelViewSet):
             # Возвращаем обновленные данные
             updated_serializer = self.get_serializer(product)
             return Response({
-                'product': updated_serializer.data,
+                'product': serializer.data,
                 'message': _('Товар успешно создан'),
                 'action': 'product_created'
             }, status=status.HTTP_201_CREATED)
@@ -472,9 +454,7 @@ class ProductViewSet(ModelViewSet):
     )
     @action(detail=False, methods=['get'])
     def scan_barcode(self, request):
-        """
-        Сканирование штрих-кода - возвращает товар если существует или форму создания
-        """
+        """Сканирование штрих-кода - ищет только в текущем магазине"""
         barcode = request.query_params.get('barcode')
         if not barcode:
             return Response(
@@ -482,26 +462,35 @@ class ProductViewSet(ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        try:
-            product = Product.objects.select_related('category', 'stock').get(barcode=barcode)
+        # Ищем только в текущем магазине
+        if hasattr(request.user, 'current_store'):
+            product = Product.objects.filter(
+                store=request.user.current_store,  # ← ДОБАВИТЬ фильтр
+                barcode=barcode
+            ).select_related('category', 'stock').first()
+        else:
+            product = None
+
+        if product:
             serializer = self.get_serializer(product)
             return Response({
                 'found': True,
                 'product': serializer.data,
                 'message': _('Товар найден')
             })
-        except Product.DoesNotExist:
-            # Товар не найден, возвращаем форму для создания
-            attributes = AttributeType.objects.prefetch_related('values').all()
-            categories = ProductCategory.objects.all()
+        else:
+            # Товар не найден, возвращаем категории ТЕКУЩЕГО МАГАЗИНА
+            if hasattr(request.user, 'current_store'):
+                categories = ProductCategory.objects.filter(
+                    store=request.user.current_store  # ← ДОБАВИТЬ фильтр
+                )
+            else:
+                categories = ProductCategory.objects.none()
 
             return Response({
                 'found': False,
                 'barcode': barcode,
-                'form_data': {
-                    'categories': ProductCategorySerializer(categories, many=True).data,
-                    'attributes': AttributeTypeSerializer(attributes, many=True).data
-                },
+                'categories': ProductCategorySerializer(categories, many=True).data,
                 'message': _('Товар не найден. Создайте новый товар.')
             })
 
@@ -550,7 +539,7 @@ class ProductViewSet(ModelViewSet):
         })
 
 
-class ProductBatchViewSet(ModelViewSet):
+class ProductBatchViewSet(StoreViewSetMixin, ModelViewSet):
     """
     ViewSet для управления партиями товаров
     """
@@ -602,7 +591,7 @@ class ProductBatchViewSet(ModelViewSet):
         })
 
 
-class StockViewSet(ModelViewSet):
+class StockViewSet(StoreViewSetMixin, ModelViewSet):
     """
     ViewSet для управления остатками на складе
     """

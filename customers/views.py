@@ -5,6 +5,7 @@ from django.utils.dateparse import parse_date
 from drf_yasg.utils import swagger_auto_schema
 from .serializers import CustomerSerializer
 from .models import Customer
+from stores.mixins import StoreViewSetMixin
 
 from rest_framework.pagination import LimitOffsetPagination, PageNumberPagination
 
@@ -77,17 +78,22 @@ class FlexiblePagination(PageNumberPagination):
 
 
 
-class CustomerViewSet(viewsets.ModelViewSet):
+class CustomerViewSet(StoreViewSetMixin, viewsets.ModelViewSet):
     serializer_class = CustomerSerializer
     pagination_class = FlexiblePagination
 
     def get_queryset(self):
-        queryset = Customer.objects.annotate(
+        # Сначала получаем отфильтрованный по магазину queryset из миксина
+        queryset = super().get_queryset()
+
+        # Затем применяем дополнительные фильтры
+        queryset = queryset.annotate(
             annotated_last_purchase_date=Max(
                 'purchases__created_at',
                 filter=Q(purchases__status='completed')
             )
         )
+
         request = self.request
         query = request.query_params.get('q', '').strip()
         date_from_str = request.query_params.get('date_from')

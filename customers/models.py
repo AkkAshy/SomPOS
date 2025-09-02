@@ -2,8 +2,9 @@ from django.db import models
 from django.core.validators import MinValueValidator
 from django.db.models import Max
 from django.utils import timezone
+from stores.mixins import StoreOwnedModel, StoreOwnedManager
 
-class Customer(models.Model):
+class Customer(StoreOwnedModel):
     full_name = models.CharField(max_length=255, null=True, blank=True, verbose_name="Полное имя")
     phone = models.CharField(max_length=20, unique=True, null=True, blank=True, verbose_name="Телефон")
     email = models.EmailField(null=True, blank=True, verbose_name="Электронная почта")
@@ -16,10 +17,11 @@ class Customer(models.Model):
         blank=True,
         help_text="Дата последней покупки"
     )
-
+    objects = StoreOwnedManager()
     class Meta:
         verbose_name = "Покупатель"
         verbose_name_plural = "Покупатели"
+        unique_together = ['store', 'phone']
 
     def __str__(self):
         return self.full_name or self.phone or self.email or "Анонимный покупатель"

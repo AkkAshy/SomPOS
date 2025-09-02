@@ -19,6 +19,7 @@ from django.utils.translation import gettext_lazy as _
 from customers.views import FlexiblePagination
 from .pagination import OptionalPagination
 import logging
+from stores.mixins import StoreViewSetMixin
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ class IsCashierOrManagerOrAdmin(permissions.BasePermission):
         return request.user.groups.filter(name__in=['admin', 'manager', 'cashier']).exists()
 
 class TransactionViewSet(viewsets.ModelViewSet):
-    queryset = Transaction.objects.all()
+    # queryset = Transaction.objects.all()
     serializer_class = TransactionSerializer
     permission_classes = [permissions.IsAuthenticated, IsCashierOrManagerOrAdmin]
 
@@ -38,6 +39,9 @@ class TransactionViewSet(viewsets.ModelViewSet):
     def list(self, request, *args, **kwargs):
         return super().list(request, *args, **kwargs)
 
+    def get_queryset(self):
+        # Базовый queryset с фильтрацией по магазину из миксина
+        return Transaction.objects.select_related('customer', 'cashier').prefetch_related('items')
     @swagger_auto_schema(
         operation_description="Создать новую продажу. Для оплаты в долг укажите customer_id или new_customer с full_name и phone.",
         request_body=TransactionSerializer,
@@ -47,6 +51,7 @@ class TransactionViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        # perform_create теперь в миксине добавит store и cashier
         self.perform_create(serializer)
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
@@ -57,7 +62,7 @@ class TransactionViewSet(viewsets.ModelViewSet):
 
 
 
-class TransactionHistoryListView(viewsets.ReadOnlyModelViewSet):
+class TransactionHistoryListView(StoreViewSetMixin, viewsets.ReadOnlyModelViewSet):
     """
     ViewSet для просмотра истории транзакций без автоматического пагинатора
     Ручная обработка limit/offset с правильным подсчетом записей
@@ -71,10 +76,12 @@ class TransactionHistoryListView(viewsets.ReadOnlyModelViewSet):
     filterset_fields = ['transaction']
 
     def get_queryset(self):
-        """
-        Базовый queryset с фильтрацией
-        """
-        queryset = TransactionHistory.objects.filter(
+        """Базовый queryset с фильтрацией по магазину"""
+        # Сначала применяем фильтр магазина из миксина
+        queryset = super().get_queryset()
+
+        # Затем существующая фильтрация
+        queryset = queryset.filter(
             action__in=['completed', 'refunded']
         ).exclude(
             Q(details__isnull=True) | Q(details='') | Q(details='{}')

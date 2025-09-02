@@ -37,18 +37,18 @@ schema_view = get_schema_view(
 urlpatterns = [
     path('admin/', admin.site.urls),
 
-    # Склады и товары
+    # Добавить маршрут для магазинов
+    path('api/stores/', include('stores.urls')),  # ← ДОБАВИТЬ ЭТУ СТРОКУ
+
+    # Существующие маршруты
     path('inventory/', include('inventory.urls')),
-    # Покупатели
     path('customers/', include('customers.urls')),
-    # Продажи
     path('sales/', include('sales.urls')),
-
     path('users/', include('users.urls')),
-    # Аналитика
     path('analytics/', include('analytics.urls')),
+    path('sms/', include('sms_sender.urls')),
 
-    # Документация
+    # Swagger
     re_path(r'^swagger(?P<format>\.json|\.yaml)$',
             schema_view.without_ui(cache_timeout=0),
             name='schema-json'),
@@ -58,6 +58,4 @@ urlpatterns = [
     path('redoc/',
          schema_view.with_ui('redoc', cache_timeout=0),
          name='schema-redoc'),
-    path('sms/', include('sms_sender.urls')),
-
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

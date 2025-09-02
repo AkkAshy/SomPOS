@@ -6,11 +6,12 @@ from sales.models import Transaction
 from customers.models import Customer
 import logging
 from django.contrib.auth.models import User
+from stores.mixins import StoreOwnedModel, StoreOwnedManager
 
 
 logger = logging.getLogger('analytics')
 
-class SalesSummary(models.Model):
+class SalesSummary(StoreOwnedModel):
     """
     Агрегированная статистика по продажам за день.
     Храним данные по дням, чтобы снизить нагрузку на запросы.
@@ -39,10 +40,12 @@ class SalesSummary(models.Model):
         verbose_name=_("Метод оплаты")
     )
 
+    objects = StoreOwnedManager()  # ← ДОБАВИТЬ
+
     class Meta:
         verbose_name = _("Сводка по продажам")
         verbose_name_plural = _("Сводки по продажам")
-        unique_together = ('date', 'payment_method')
+        unique_together = ('store', 'date', 'payment_method')  # ← ИЗМЕНИТЬ
         ordering = ['-date']
 
     def __str__(self):

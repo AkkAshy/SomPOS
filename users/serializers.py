@@ -5,6 +5,8 @@ from .models import Employee
 from django.utils.translation import gettext_lazy as _
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import authenticate
+from stores.models import StoreEmployee
+from stores.tokens import get_tokens_for_user_and_store
 
 class EmployeeSerializer(serializers.ModelSerializer):
     class Meta:
@@ -88,23 +90,82 @@ class UserSerializer(serializers.ModelSerializer):
 class LoginSerializer(serializers.Serializer):
     username = serializers.CharField(required=True)
     password = serializers.CharField(required=True, write_only=True)
+    store_id = serializers.UUIDField(required=False, help_text="ID магазина (опционально)")
 
     def validate(self, data):
         username = data.get('username')
         password = data.get('password')
+        store_id = data.get('store_id')
 
-        print(f'Валидация: {username=} {password=}')
-        user = authenticate(request=self.context.get('request'), username=username, password=password)
-        print(f'Найден пользователь: {user}')
+        user = authenticate(
+            request=self.context.get('request'),
+            username=username,
+            password=password
+        )
 
         if user and user.is_active:
-            refresh = RefreshToken.for_user(user)
+            # Получаем магазины пользователя
+            store_memberships = StoreEmployee.objects.filter(
+                user=user,
+                is_active=True
+            ).select_related('store')
+
+            # Если у пользователя нет магазинов
+            if not store_memberships.exists():
+                raise serializers.ValidationError(
+                    _("Пользователь не привязан ни к одному магазину. Обратитесь к администратору.")
+                )
+
+            # Если магазин не указан, берем первый доступный
+            if not store_id:
+                first_membership = store_memberships.first()
+                if first_membership:
+                    store_id = str(first_membership.store.id)
+            else:
+                # Проверяем доступ к указанному магазину
+                if not store_memberships.filter(store_id=store_id).exists():
+                    raise serializers.ValidationError(
+                        _("У вас нет доступа к указанному магазину")
+                    )
+
+            # Генерируем токены с информацией о магазине
+            tokens = get_tokens_for_user_and_store(user, store_id)
+
+            # Получаем информацию о текущем магазине
+            current_membership = store_memberships.filter(store_id=store_id).first()
+
+            # Список всех доступных магазинов
+            stores_data = []
+            for membership in store_memberships:
+                stores_data.append({
+                    'id': str(membership.store.id),
+                    'name': membership.store.name,
+                    'role': membership.role,
+                    'logo': membership.store.logo.url if membership.store.logo else None,
+                    'is_current': str(membership.store.id) == store_id
+                })
+
             return {
                 'username': user.username,
-                'access': str(refresh.access_token),
-                'refresh': str(refresh),
+                'access': tokens['access'],
+                'refresh': tokens['refresh'],
+                'user': {
+                    'id': user.id,
+                    'username': user.username,
+                    'email': user.email,
+                    'first_name': user.first_name,
+                    'last_name': user.last_name,
+                    'full_name': user.get_full_name()
+                },
+                'current_store': {
+                    'id': tokens['store_id'],
+                    'name': tokens['store_name'],
+                    'role': tokens['store_role']
+                } if current_membership else None,
+                'available_stores': stores_data,
                 'role': user.employee.role if hasattr(user, 'employee') else None
             }
+
         raise serializers.ValidationError(_("Неверные учетные данные"))
 
 
