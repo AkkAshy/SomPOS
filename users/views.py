@@ -1,4 +1,4 @@
-# auth/views.py
+# users/views.py (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
@@ -18,20 +18,133 @@ User = get_user_model()
 
 logger = logging.getLogger(__name__)
 
+# ✅ ДОБАВЛЯЕМ простую функцию логина
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods
+from django.http import JsonResponse
+import json
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def simple_login(request):
+    """
+    Простой логин без DRF
+    """
+    try:
+        data = json.loads(request.body.decode('utf-8'))
+        username = data.get('username')
+        password = data.get('password')
+        store_id = data.get('store_id')
+        
+        if not username or not password:
+            return JsonResponse(
+                {'error': 'Username и password обязательны'},
+                status=400
+            )
+        
+        # Аутентификация
+        user = authenticate(username=username, password=password)
+        
+        if not user or not user.is_active:
+            return JsonResponse(
+                {'error': 'Неверный логин или пароль'},
+                status=401
+            )
+        
+        # Получаем магазины
+        from stores.models import StoreEmployee
+        store_memberships = StoreEmployee.objects.filter(
+            user=user,
+            is_active=True
+        ).select_related('store')
+        
+        if not store_memberships.exists():
+            return JsonResponse(
+                {'error': 'Пользователь не привязан ни к одному магазину'},
+                status=403
+            )
+        
+        # Определяем текущий магазин
+        if store_id:
+            current_membership = store_memberships.filter(store_id=store_id).first()
+            if not current_membership:
+                return JsonResponse(
+                    {'error': 'У вас нет доступа к указанному магазину'},
+                    status=403
+                )
+        else:
+            current_membership = store_memberships.first()
+        
+        # Генерируем токены
+        from stores.tokens import get_tokens_for_user_and_store
+        tokens = get_tokens_for_user_and_store(user, str(current_membership.store.id))
+        
+        # Формируем список магазинов
+        available_stores = []
+        for membership in store_memberships:
+            available_stores.append({
+                'id': str(membership.store.id),
+                'name': membership.store.name,
+                'role': membership.role,
+                'is_current': str(membership.store.id) == str(current_membership.store.id)
+            })
+        
+        return JsonResponse({
+            'success': True,
+            'access': tokens['access'],
+            'refresh': tokens['refresh'],
+            'user': {
+                'id': user.id,
+                'username': user.username,
+                'email': user.email,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+            },
+            'current_store': {
+                'id': str(current_membership.store.id),
+                'name': current_membership.store.name,
+                'role': current_membership.role
+            },
+            'available_stores': available_stores
+        })
+        
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Неверный формат JSON'}, status=400)
+    except Exception as e:
+        logger.error(f"Login error: {str(e)}", exc_info=True)
+        return JsonResponse({'error': 'Внутренняя ошибка сервера'}, status=500)
+
 
 class LoginView(APIView):
+    """
+    ИСПРАВЛЕННЫЙ LoginView - возвращает токены с информацией о магазине
+    """
     permission_classes = [permissions.AllowAny]
+    authentication_classes = []
 
     @swagger_auto_schema(
-        operation_summary="Вход сотрудника",
-        request_body=LoginSerializer,
+        operation_summary="Вход пользователя с получением токенов",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'username': openapi.Schema(type=openapi.TYPE_STRING, example='testadmin'),
+                'password': openapi.Schema(type=openapi.TYPE_STRING, example='secure123'),
+                'store_id': openapi.Schema(type=openapi.TYPE_STRING, format='uuid', description='ID магазина (опционально)')
+            },
+            required=['username', 'password']
+        ),
         responses={
-            200: openapi.Response('Токены', schema=openapi.Schema(
+            200: openapi.Response('Успешный вход', schema=openapi.Schema(
                 type=openapi.TYPE_OBJECT,
                 properties={
-                    'refresh': openapi.Schema(type=openapi.TYPE_STRING),
                     'access': openapi.Schema(type=openapi.TYPE_STRING),
-                    'user': UserSerializer()
+                    'refresh': openapi.Schema(type=openapi.TYPE_STRING),
+                    'user': openapi.Schema(type=openapi.TYPE_OBJECT),
+                    'current_store': openapi.Schema(type=openapi.TYPE_OBJECT),
+                    'available_stores': openapi.Schema(
+                        type=openapi.TYPE_ARRAY,
+                        items=openapi.Schema(type=openapi.TYPE_OBJECT)
+                    )
                 }
             )),
             400: "Неверные данные",
@@ -40,87 +153,198 @@ class LoginView(APIView):
         tags=['Authentication']
     )
     def post(self, request):
-        logger.debug(f"Login request: {request.data}")
-        serializer = LoginSerializer(data=request.data)
-        if serializer.is_valid():
-            logger.debug(f"Validated data: {serializer.validated_data}")
-            # Получаем аутентифицированного пользователя
-            user = authenticate(
-                username=serializer.validated_data['username'],
-                password=serializer.validated_data.get('password')
-            )
-            if user and user.is_active:
-                return Response({
-                    'refresh': serializer.validated_data['refresh'],
-                    'access': serializer.validated_data['access'],
-                    'user': UserSerializer(user).data  # Используем user вместо request.user
-                }, status=status.HTTP_200_OK)
+        logger.info("Login attempt started")
+        
+        username = request.data.get('username')
+        password = request.data.get('password')
+        store_id = request.data.get('store_id')
+        
+        if not username or not password:
             return Response(
-                {"error": _("Неверный логин или пароль")},
+                {'error': 'Username и password обязательны'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Аутентификация пользователя
+        user = authenticate(username=username, password=password)
+        
+        if not user:
+            return Response(
+                {"error": "Неверный логин или пароль"},
                 status=status.HTTP_401_UNAUTHORIZED
             )
-        logger.error(f"Login failed: {serializer.errors}")
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not user.is_active:
+            return Response(
+                {"error": "Аккаунт деактивирован"},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        
+        logger.info(f"User {username} authenticated successfully")
+        
+        # Получаем магазины пользователя
+        from stores.models import StoreEmployee
+        store_memberships = StoreEmployee.objects.filter(
+            user=user,
+            is_active=True
+        ).select_related('store')
+        
+        if not store_memberships.exists():
+            return Response(
+                {"error": "Пользователь не привязан ни к одному магазину. Обратитесь к администратору."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Определяем текущий магазин
+        if store_id:
+            # Проверяем доступ к указанному магазину
+            current_membership = store_memberships.filter(store_id=store_id).first()
+            if not current_membership:
+                return Response(
+                    {"error": "У вас нет доступа к указанному магазину"},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        else:
+            # Берем первый доступный магазин
+            current_membership = store_memberships.first()
+        
+        # Генерируем токены с информацией о магазине
+        from stores.tokens import get_tokens_for_user_and_store
+        tokens = get_tokens_for_user_and_store(user, str(current_membership.store.id))
+        
+        # Формируем список всех доступных магазинов
+        available_stores = []
+        for membership in store_memberships:
+            available_stores.append({
+                'id': str(membership.store.id),
+                'name': membership.store.name,
+                'role': membership.role,
+                'logo': membership.store.logo.url if membership.store.logo else None,
+                'is_current': str(membership.store.id) == str(current_membership.store.id)
+            })
+        
+        response_data = {
+            'access': tokens['access'],
+            'refresh': tokens['refresh'],
+            'user': {
+                'id': user.id,
+                'username': user.username,
+                'email': user.email,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+                'full_name': user.get_full_name() or user.username
+            },
+            'current_store': {
+                'id': str(current_membership.store.id),
+                'name': current_membership.store.name,
+                'role': current_membership.role
+            },
+            'available_stores': available_stores,
+            'message': 'Успешный вход в систему'
+        }
+        
+        logger.info(f"Login successful for {username} with store {current_membership.store.name}")
+        return Response(response_data, status=status.HTTP_200_OK)
 
 
-# class LoginView(APIView):
-#     permission_classes = [permissions.AllowAny]
+# ДОБАВЛЯЕМ простую функцию логина тоже
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods
+from django.http import JsonResponse
+import json
 
-#     @swagger_auto_schema(
-#         operation_summary="Вход сотрудника",
-#         request_body=LoginSerializer,
-#         responses={
-#             200: openapi.Response('Токены', schema=openapi.Schema(
-#                 type=openapi.TYPE_OBJECT,
-#                 properties={
-#                     'refresh': openapi.Schema(type=openapi.TYPE_STRING),
-#                     'access': openapi.Schema(type=openapi.TYPE_STRING),
-#                     'user': UserSerializer()
-#                 }
-#             )),
-#             400: "Неверные данные",
-#             401: "Неверный логин или пароль"
-#         },
-#         tags=['Authentication']
-#     )
-#     def post(self, request):
-#         print('==============================================')
-#         print('LoginView.post')
-#         print('request.data', request.data)
-#         print('request.user', request.user)
-#         print('request.auth', request.auth)
-#         print('==============================================')
-#         serializer = LoginSerializer(data=request.data)
-#         if serializer.is_valid():
-#             print('==============================================')
-#             print('serializer.validated_data', serializer.validated_data)
-#             print('==============================================')
-#             user = authenticate(
-#                 username=serializer.validated_data['username'],
-#                 password=serializer.validated_data['password']
-#             )
-#             if user:
-#                 print('==============================================')
-#                 print('user', user)
-#                 print('==============================================')
-#                 refresh = RefreshToken.for_user(user)
-#                 print('==============================================')
-#                 print('refresh', str(refresh))
-#                 print('==============================================')
-#                 return Response({
-#                     'refresh': str(refresh),
-#                     'access': str(refresh.access_token),
-#                     'user': UserSerializer(user).data
-#                 })
-#             return Response(
-#                 {"error": _("Неверный логин или пароль")},
-#                 status=status.HTTP_401_UNAUTHORIZED
-#             )
-#         print('==============================================')
-#         print('serializer.errors', serializer.errors)
-#         print('==============================================')
-#         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+@csrf_exempt
+@require_http_methods(["POST"])
+def simple_login(request):
+    """
+    Простой логин без DRF
+    """
+    try:
+        data = json.loads(request.body.decode('utf-8'))
+        username = data.get('username')
+        password = data.get('password')
+        store_id = data.get('store_id')
+        
+        if not username or not password:
+            return JsonResponse(
+                {'error': 'Username и password обязательны'},
+                status=400
+            )
+        
+        # Аутентификация
+        user = authenticate(username=username, password=password)
+        
+        if not user or not user.is_active:
+            return JsonResponse(
+                {'error': 'Неверный логин или пароль'},
+                status=401
+            )
+        
+        # Получаем магазины
+        from stores.models import StoreEmployee
+        store_memberships = StoreEmployee.objects.filter(
+            user=user,
+            is_active=True
+        ).select_related('store')
+        
+        if not store_memberships.exists():
+            return JsonResponse(
+                {'error': 'Пользователь не привязан ни к одному магазину'},
+                status=403
+            )
+        
+        # Определяем текущий магазин
+        if store_id:
+            current_membership = store_memberships.filter(store_id=store_id).first()
+            if not current_membership:
+                return JsonResponse(
+                    {'error': 'У вас нет доступа к указанному магазину'},
+                    status=403
+                )
+        else:
+            current_membership = store_memberships.first()
+        
+        # Генерируем токены
+        from stores.tokens import get_tokens_for_user_and_store
+        tokens = get_tokens_for_user_and_store(user, str(current_membership.store.id))
+        
+        # Формируем список магазинов
+        available_stores = []
+        for membership in store_memberships:
+            available_stores.append({
+                'id': str(membership.store.id),
+                'name': membership.store.name,
+                'role': membership.role,
+                'is_current': str(membership.store.id) == str(current_membership.store.id)
+            })
+        
+        return JsonResponse({
+            'success': True,
+            'access': tokens['access'],
+            'refresh': tokens['refresh'],
+            'user': {
+                'id': user.id,
+                'username': user.username,
+                'email': user.email,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+            },
+            'current_store': {
+                'id': str(current_membership.store.id),
+                'name': current_membership.store.name,
+                'role': current_membership.role
+            },
+            'available_stores': available_stores
+        })
+        
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Неверный формат JSON'}, status=400)
+    except Exception as e:
+        logger.error(f"Login error: {str(e)}", exc_info=True)
+        return JsonResponse({'error': 'Внутренняя ошибка сервера'}, status=500)
 
+
+# Остальные views остаются без изменений...
 class RegisterView(APIView):
     permission_classes = [permissions.IsAdminUser]
 
@@ -130,9 +354,7 @@ class RegisterView(APIView):
         responses={201: UserSerializer, 400: "Неверные данные"},
         tags=['Registration']
     )
-
     def post(self, request):
-
         serializer = UserSerializer(data=request.data)
         if serializer.is_valid():
             user = serializer.save()
@@ -145,7 +367,6 @@ class RegisterView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-
 class ProfileUpdateView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -156,34 +377,12 @@ class ProfileUpdateView(APIView):
         tags=['Update Profile']
     )
     def patch(self, request):
-        """
-        Частичное обновление профиля пользователя
-
-        PATCH /api/users/profile/
-
-        Request Body (любые из полей):
-            {
-                "username": "string",
-                "email": "string",
-                "first_name": "string",
-                "last_name": "string",
-                "groups": ["string"],
-                "employee": {
-                    "role": "string",
-                    "phone": "string",
-                    "photo": "string"
-                },
-                "password": "string"
-            }
-        """
         user = request.user
-        serializer = UserSerializer(user, data=request.data, partial=True)  # ✅ partial=True
+        serializer = UserSerializer(user, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-
 
 
 class ProfileView(APIView):
@@ -195,31 +394,7 @@ class ProfileView(APIView):
         responses={200: UserSerializer, 404: "Пользователь не найден"},
         tags=['Profile']
     )
-
     def get(self, request):
-        """
-        Получение профиля текущего пользователя
-
-        GET /api/users/profile/
-
-        Response:
-            200: {
-                "id": integer,
-                "username": "string",
-                "email": "string",
-                "first_name": "string",
-                "last_name": "string",
-                "groups": ["string"],
-                "employee": {
-                    "role": "string",
-                    "phone": "string",
-                    "photo": "string"
-                }
-            }
-            404: {
-                "error": "Пользователь не найден"
-            }
-        """
         user = request.user
         serializer = UserSerializer(user)
         return Response(serializer.data)
@@ -256,7 +431,6 @@ class UserListView(APIView):
         if search_name or search_id:
             filters = Q()
             if search_name:
-                # Добавляем аннотированное поле full_name
                 users = users.annotate(
                     full_name=Concat('first_name', Value(' '), 'last_name')
                 )
@@ -281,6 +455,7 @@ class UserListView(APIView):
         serializer = UserSerializer(users, many=True)
         logger.debug(f"Retrieved {len(users)} users with filters: name={search_name}, id={search_id}")
         return Response(serializer.data)
+
 
 class UserDetailView(APIView):
     permission_classes = [permissions.IsAuthenticated]

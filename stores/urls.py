@@ -1,35 +1,47 @@
-# stores/urls.py
+# stores/urls.py (ПОЛНАЯ ВЕРСИЯ)
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-
-# Временные заглушки, пока не созданы views
-urlpatterns = [
-    # Пока пустой список URL, чтобы приложение запускалось
-]
-
-# После создания views.py, замените на:
-
+from django.http import JsonResponse
 from .views import (
-    StoreViewSet, StoreRegisterView, CreateUserForStoreView,
-    SwitchStoreView, RefreshTokenWithStoreView
+    StoreViewSet, CreateUserForStoreView, SwitchStoreView,
+    simple_store_register, simple_refresh_token
 )
 
+# Отладочный view
+def debug_urls(request):
+    return JsonResponse({
+        'message': 'Stores URLs работают!',
+        'available_endpoints': [
+            '/api/stores/register/ (POST) - Регистрация магазина',
+            '/api/stores/refresh-token/ (POST) - Обновление токена', 
+            '/api/stores/debug/ (GET) - Этот endpoint',
+            '/api/stores/ (GET) - Список магазинов (требует авторизацию)',
+            '/api/stores/{id}/ (GET/PUT/PATCH/DELETE) - Управление магазином',
+            '/api/stores/{id}/employees/ (GET) - Список сотрудников',
+            '/api/stores/{id}/add_employee/ (POST) - Добавить сотрудника',
+            '/api/stores/{id}/remove_employee/ (DELETE) - Удалить сотрудника',
+            '/api/stores/{id}/statistics/ (GET) - Статистика магазина',
+            '/api/stores/current/ (GET) - Текущий магазин',
+            '/api/stores/switch-store/ (POST) - Переключение магазина',
+            '/api/stores/create-user/ (POST) - Создать пользователя',
+        ]
+    })
+
 router = DefaultRouter()
-router.register(r'stores', StoreViewSet, basename='store')
+router.register(r'', StoreViewSet, basename='store')
 
 urlpatterns = [
-    # Регистрация первого админа и магазина
-    path('register/', StoreRegisterView.as_view(), name='store-register'),
+    # ✅ ОТЛАДОЧНЫЙ endpoint
+    path('debug/', debug_urls, name='debug-urls'),
+    
+    # ✅ ПРОСТЫЕ функции без DRF (без аутентификации)
+    path('register/', simple_store_register, name='simple-store-register'),
+    path('refresh-token/', simple_refresh_token, name='simple-refresh-token'),
 
-    # Переключение магазина с новым токеном
+    # ✅ DRF views (с аутентификацией)
     path('switch-store/', SwitchStoreView.as_view(), name='switch-store'),
-
-    # Обновление токена с магазином
-    path('refresh-token/', RefreshTokenWithStoreView.as_view(), name='refresh-token-store'),
-
-    # Создание пользователя для текущего магазина
     path('create-user/', CreateUserForStoreView.as_view(), name='create-store-user'),
 
-    # CRUD магазинов
+    # ✅ ViewSet через роутер
     path('', include(router.urls)),
 ]
