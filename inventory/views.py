@@ -86,21 +86,12 @@ class ProductCategoryViewSet(StoreViewSetMixin, ModelViewSet):
     ordering_fields = ['name', 'created_at']
     ordering = ['name']
 
-    @swagger_auto_schema(
-        operation_description="Получить все категории товаров",
-        responses={200: ProductCategorySerializer(many=True)}
-    )
+
     # def list(self, request, *args, **kwargs):
     #     return super().list(request, *args, **kwargs)
 
-    @swagger_auto_schema(
-        operation_description="Создать новую категорию товара",
-        request_body=ProductCategorySerializer,
-        responses={
-            201: ProductCategorySerializer,
-            400: 'Ошибка валидации'
-        }
-    )
+  
+
     # def create(self, request, *args, **kwargs):
     #     return super().create(request, *args, **kwargs)
 

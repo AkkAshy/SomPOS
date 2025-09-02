@@ -124,6 +124,8 @@ class StoreEmployee(models.Model):
     store = models.ForeignKey(
         Store,
         on_delete=models.CASCADE,
+        null=True,
+        blank=True,
         related_name='store_employees',
         verbose_name=_("Магазин")
     )

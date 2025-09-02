@@ -11,6 +11,8 @@ from .models import (Product, ProductCategory, Stock,
                      )
 from users.serializers import UserSerializer
 
+
+
 class ProductCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductCategory
