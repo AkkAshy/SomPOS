@@ -6,13 +6,15 @@ from django.contrib.auth import authenticate
 from django.utils.translation import gettext_lazy as _
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
-from .serializers import LoginSerializer, UserSerializer
+from .serializers import LoginSerializer, UserSerializer, StoreEmployeeUserSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
 import logging
 from django.contrib.auth import get_user_model
 from django.shortcuts import get_object_or_404
 from django.db.models import Q, Value
 from django.db.models.functions import Concat
+
+
 
 User = get_user_model()
 
@@ -404,78 +406,319 @@ class UserListView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     @swagger_auto_schema(
-        operation_summary="Список пользователей с фильтрацией по имени, фамилии или ID",
+        operation_summary="Список сотрудников текущего магазина (из JWT токена)",
         manual_parameters=[
             openapi.Parameter(
                 'name',
                 openapi.IN_QUERY,
-                description="Поиск по имени, фамилии или полному имени",
+                description="Поиск по имени, фамилии, username",
                 type=openapi.TYPE_STRING
             ),
             openapi.Parameter(
-                'id',
+                'role',
                 openapi.IN_QUERY,
-                description="Поиск по ID пользователя",
-                type=openapi.TYPE_INTEGER
+                description="Фильтр по роли (owner, admin, manager, cashier, stockkeeper)",
+                type=openapi.TYPE_STRING
+            ),
+            openapi.Parameter(
+                'is_active',
+                openapi.IN_QUERY,
+                description="Только активные сотрудники",
+                type=openapi.TYPE_BOOLEAN
             ),
         ],
-        responses={200: UserSerializer(many=True)},
-        tags=['User List']
-    )
-    def get(self, request, pk=None):
-        search_name = request.query_params.get('name')
-        search_id = request.query_params.get('id')
-
-        users = User.objects.all()
-
-        if search_name or search_id:
-            filters = Q()
-            if search_name:
-                users = users.annotate(
-                    full_name=Concat('first_name', Value(' '), 'last_name')
-                )
-                filters |= (
-                    Q(first_name__icontains=search_name) |
-                    Q(last_name__icontains=search_name) |
-                    Q(full_name__icontains=search_name)
-                )
-            if search_id:
-                try:
-                    search_id = int(search_id)
-                    filters |= Q(id__exact=search_id)
-                except ValueError:
-                    logger.warning(f"Invalid ID format: {search_id}")
-                    return Response(
-                        {"error": "Параметр 'id' должен быть целым числом"},
-                        status=400
+        responses={200: openapi.Response(
+            description="Список сотрудников магазина",
+            schema=openapi.Schema(
+                type=openapi.TYPE_OBJECT,
+                properties={
+                    'store': openapi.Schema(type=openapi.TYPE_OBJECT),
+                    'total_employees': openapi.Schema(type=openapi.TYPE_INTEGER),
+                    'employees': openapi.Schema(
+                        type=openapi.TYPE_ARRAY,
+                        items=openapi.Schema(type=openapi.TYPE_OBJECT)
                     )
-
-            users = users.filter(filters)
-
-        serializer = UserSerializer(users, many=True)
-        logger.debug(f"Retrieved {len(users)} users with filters: name={search_name}, id={search_id}")
-        return Response(serializer.data)
-
+                }
+            )
+        )},
+        tags=['Users']
+    )
+    def get(self, request):
+        from stores.models import StoreEmployee, Store
+        from .serializers import StoreEmployeeUserSerializer
+        import jwt
+        from rest_framework_simplejwt.tokens import AccessToken
+        
+        # Получаем текущий магазин из JWT токена
+        current_store = None
+        current_user_role = None
+        
+        # Способ 1: Извлекаем из JWT токена
+        auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+        if auth_header.startswith('Bearer '):
+            try:
+                token = auth_header.split(' ')[1]
+                # Декодируем токен
+                decoded_token = AccessToken(token)
+                
+                store_id = decoded_token.get('store_id')
+                store_name = decoded_token.get('store_name')
+                store_role = decoded_token.get('store_role')
+                
+                logger.info(f"JWT Token info - store_id: {store_id}, store_name: {store_name}, role: {store_role}")
+                
+                if store_id:
+                    try:
+                        current_store = Store.objects.get(id=store_id)
+                        current_user_role = store_role
+                        logger.info(f"✅ Store from JWT: {current_store.name}")
+                    except Store.DoesNotExist:
+                        logger.error(f"Store {store_id} from JWT not found")
+                        
+            except Exception as e:
+                logger.error(f"Error decoding JWT: {e}")
+        
+        # Способ 2: Если не удалось из JWT, пробуем из middleware
+        if not current_store and hasattr(request.user, 'current_store') and request.user.current_store:
+            current_store = request.user.current_store
+            current_user_role = getattr(request.user, 'store_role', None)
+            logger.info(f"✅ Store from middleware: {current_store.name}")
+        
+        # Способ 3: Если все еще нет, берем из базы
+        if not current_store:
+            store_membership = StoreEmployee.objects.filter(
+                user=request.user,
+                is_active=True
+            ).select_related('store').first()
+            
+            if store_membership:
+                current_store = store_membership.store
+                current_user_role = store_membership.role
+                logger.info(f"✅ Store from DB: {current_store.name}")
+            else:
+                logger.error(f"No store found for user {request.user.username}")
+                return Response(
+                    {
+                        "error": "У вас нет доступа к магазину",
+                        "debug_info": {
+                            "user": request.user.username,
+                            "jwt_decoded": auth_header.startswith('Bearer '),
+                            "has_middleware_store": hasattr(request.user, 'current_store')
+                        }
+                    },
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        
+        # Проверяем права доступа
+        if current_user_role not in ['owner', 'admin', 'manager']:
+            return Response(
+                {
+                    "error": "У вас нет прав для просмотра списка сотрудников",
+                    "your_role": current_user_role
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Получаем ТОЛЬКО сотрудников ТЕКУЩЕГО магазина
+        queryset = StoreEmployee.objects.filter(
+            store=current_store  # ← ФИЛЬТРУЕМ ПО МАГАЗИНУ ИЗ JWT
+        ).select_related('user', 'user__employee')
+        
+        logger.info(f"Filtering employees for store: {current_store.name} (ID: {current_store.id})")
+        
+        # Применяем дополнительные фильтры
+        role_filter = request.query_params.get('role')
+        if role_filter:
+            queryset = queryset.filter(role=role_filter)
+        
+        is_active = request.query_params.get('is_active')
+        if is_active is not None:
+            is_active_bool = str(is_active).lower() in ['true', '1', 'yes']
+            queryset = queryset.filter(is_active=is_active_bool)
+        
+        search_name = request.query_params.get('name')
+        if search_name:
+            queryset = queryset.filter(
+                Q(user__first_name__icontains=search_name) |
+                Q(user__last_name__icontains=search_name) |
+                Q(user__username__icontains=search_name)
+            )
+        
+        # Получаем пользователей
+        users = []
+        for se in queryset:
+            user = se.user
+            users.append(user)
+        
+        logger.info(f"Found {len(users)} employees in store {current_store.name}")
+        
+        # Сериализуем с контекстом магазина
+        serializer = StoreEmployeeUserSerializer(
+            users, 
+            many=True,
+            context={
+                'store': current_store, 
+                'request': request
+            }
+        )
+        
+        # Формируем статистику
+        stats = {
+            'total': queryset.count(),
+            'active': queryset.filter(is_active=True).count(),
+            'by_role': {}
+        }
+        
+        for role_choice in StoreEmployee.ROLE_CHOICES:
+            role_code = role_choice[0]
+            stats['by_role'][role_code] = queryset.filter(role=role_code).count()
+        
+        return Response({
+            'store': {
+                'id': str(current_store.id),
+                'name': current_store.name,
+                'address': current_store.address
+            },
+            'current_user': {
+                'username': request.user.username,
+                'role': current_user_role
+            },
+            'statistics': stats,
+            'employees': serializer.data
+        })
+    
+    def _get_current_store(self, request):
+        """Вспомогательный метод для получения текущего магазина"""
+        from stores.models import StoreEmployee
+        
+        # Пытаемся получить из атрибута пользователя
+        if hasattr(request.user, 'current_store') and request.user.current_store:
+            return request.user.current_store
+        
+        # Если нет, получаем из базы
+        store_membership = StoreEmployee.objects.filter(
+            user=request.user,
+            is_active=True
+        ).select_related('store').first()
+        
+        return store_membership.store if store_membership else None
 
 class UserDetailView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     @swagger_auto_schema(
-        operation_summary="Детальный вид пользователя по ID",
-        responses={200: UserSerializer()},
-        tags=['User Detail']
+        operation_summary="Детальная информация о сотруднике магазина",
+        responses={
+            200: StoreEmployeeUserSerializer(),
+            403: "Нет доступа",
+            404: "Пользователь не найден"
+        },
+        tags=['Users']
     )
     def get(self, request, pk):
-        user = get_object_or_404(User, pk=pk)
-        serializer = UserSerializer(user)
+        from stores.models import StoreEmployee, Store
+        from .serializers import StoreEmployeeUserSerializer
+        from rest_framework_simplejwt.tokens import AccessToken
+        
+        # Получаем текущий магазин из JWT
+        current_store = None
+        auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+        
+        if auth_header.startswith('Bearer '):
+            try:
+                token = auth_header.split(' ')[1]
+                decoded_token = AccessToken(token)
+                store_id = decoded_token.get('store_id')
+                
+                if store_id:
+                    current_store = Store.objects.filter(id=store_id).first()
+                    
+            except Exception as e:
+                logger.error(f"Error decoding JWT: {e}")
+        
+        # Fallback на другие методы
+        if not current_store:
+            current_store = self._get_current_store(request)
+        
+        if not current_store:
+            return Response(
+                {"error": "У вас нет доступа к магазину"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Проверяем что запрашиваемый пользователь является сотрудником ЭТОГО магазина
+        try:
+            store_employee = StoreEmployee.objects.get(
+                user_id=pk,
+                store=current_store  # ← Проверяем магазин
+            )
+        except StoreEmployee.DoesNotExist:
+            return Response(
+                {
+                    "error": "Пользователь не найден в этом магазине",
+                    "store": current_store.name,
+                    "user_id": pk
+                },
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        user = store_employee.user
+        
+        # Сериализуем с контекстом магазина
+        serializer = StoreEmployeeUserSerializer(
+            user,
+            context={'store': current_store, 'request': request}
+        )
+        
         return Response(serializer.data)
     
+    @swagger_auto_schema(
+        operation_summary="Обновить информацию о сотруднике",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            properties={
+                'first_name': openapi.Schema(type=openapi.TYPE_STRING),
+                'last_name': openapi.Schema(type=openapi.TYPE_STRING),
+                'email': openapi.Schema(type=openapi.TYPE_STRING),
+                'password': openapi.Schema(type=openapi.TYPE_STRING),
+                'phone': openapi.Schema(type=openapi.TYPE_STRING),
+                'sex': openapi.Schema(type=openapi.TYPE_STRING),
+                'role': openapi.Schema(type=openapi.TYPE_STRING),
+                'is_active': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+            }
+        ),
+        responses={
+            200: "Успешно обновлено",
+            403: "Нет прав",
+            404: "Не найден"
+        },
+        tags=['Users']
+    )
     def patch(self, request, pk):
-        from stores.models import StoreEmployee
+        from stores.models import StoreEmployee, Store
         from .models import Employee
+        from rest_framework_simplejwt.tokens import AccessToken
         
-        # Получаем текущий магазин
-        current_store = self._get_current_store(request)
+        # Получаем текущий магазин из JWT
+        current_store = None
+        current_user_role = None
+        auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+        
+        if auth_header.startswith('Bearer '):
+            try:
+                token = auth_header.split(' ')[1]
+                decoded_token = AccessToken(token)
+                store_id = decoded_token.get('store_id')
+                current_user_role = decoded_token.get('store_role')
+                
+                if store_id:
+                    current_store = Store.objects.filter(id=store_id).first()
+                    
+            except Exception as e:
+                logger.error(f"Error decoding JWT: {e}")
+        
+        if not current_store:
+            current_store = self._get_current_store(request)
         
         if not current_store:
             return Response(
@@ -484,22 +727,27 @@ class UserDetailView(APIView):
             )
         
         # Проверяем права (только owner и admin могут редактировать)
-        user_membership = StoreEmployee.objects.filter(
-            user=request.user,
-            store=current_store
-        ).first()
+        if not current_user_role:
+            user_membership = StoreEmployee.objects.filter(
+                user=request.user,
+                store=current_store
+            ).first()
+            current_user_role = user_membership.role if user_membership else None
         
-        if not user_membership or user_membership.role not in ['owner', 'admin']:
+        if current_user_role not in ['owner', 'admin']:
             return Response(
-                {"error": "У вас нет прав для редактирования сотрудников"},
+                {
+                    "error": "У вас нет прав для редактирования сотрудников",
+                    "your_role": current_user_role
+                },
                 status=status.HTTP_403_FORBIDDEN
             )
         
-        # Находим сотрудника
+        # Находим сотрудника В ЭТОМ МАГАЗИНЕ
         try:
             store_employee = StoreEmployee.objects.get(
                 user_id=pk,
-                store=current_store
+                store=current_store  # ← Проверяем магазин
             )
         except StoreEmployee.DoesNotExist:
             return Response(
@@ -582,6 +830,91 @@ class UserDetailView(APIView):
                 "password": user.employee.plain_password if hasattr(user, 'employee') else None
             }
         })
+    
+    @swagger_auto_schema(
+        operation_summary="Удалить сотрудника из магазина",
+        responses={
+            204: "Успешно удален",
+            403: "Нет прав",
+            404: "Не найден"
+        },
+        tags=['Users']
+    )
+    def delete(self, request, pk):
+        from stores.models import StoreEmployee, Store
+        from rest_framework_simplejwt.tokens import AccessToken
+        
+        # Получаем текущий магазин из JWT
+        current_store = None
+        current_user_role = None
+        auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+        
+        if auth_header.startswith('Bearer '):
+            try:
+                token = auth_header.split(' ')[1]
+                decoded_token = AccessToken(token)
+                store_id = decoded_token.get('store_id')
+                current_user_role = decoded_token.get('store_role')
+                
+                if store_id:
+                    current_store = Store.objects.filter(id=store_id).first()
+                    
+            except Exception as e:
+                logger.error(f"Error decoding JWT: {e}")
+        
+        if not current_store:
+            return Response(
+                {"error": "У вас нет доступа к магазину"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Только owner может удалять сотрудников
+        if current_user_role != 'owner':
+            return Response(
+                {"error": "Только владелец может удалять сотрудников"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Находим и удаляем связь с магазином
+        try:
+            store_employee = StoreEmployee.objects.get(
+                user_id=pk,
+                store=current_store  # ← Проверяем магазин
+            )
+            
+            # Нельзя удалить владельца
+            if store_employee.role == 'owner':
+                return Response(
+                    {"error": "Нельзя удалить владельца магазина"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Удаляем связь с магазином (но не самого пользователя)
+            store_employee.delete()
+            
+            logger.info(f"Employee {store_employee.user.username} removed from store {current_store.name}")
+            
+            return Response(status=status.HTTP_204_NO_CONTENT)
+            
+        except StoreEmployee.DoesNotExist:
+            return Response(
+                {"error": "Пользователь не найден в этом магазине"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+    
+    def _get_current_store(self, request):
+        """Вспомогательный метод для получения текущего магазина"""
+        from stores.models import StoreEmployee
+        
+        if hasattr(request.user, 'current_store') and request.user.current_store:
+            return request.user.current_store
+        
+        store_membership = StoreEmployee.objects.filter(
+            user=request.user,
+            is_active=True
+        ).select_related('store').first()
+        
+        return store_membership.store if store_membership else None
     
 # users/views.py - добавьте этот класс
 
