@@ -433,23 +433,14 @@ class CreateUserForStoreView(APIView):
     def post(self, request):
         logger.info(f"CreateUser request from user: {request.user.username}")
         
-        # ✅ ДОПОЛНИТЕЛЬНАЯ ДИАГНОСТИКА
-        logger.info(f"User attributes: {dir(request.user)}")
-        logger.info(f"Has current_store: {hasattr(request.user, 'current_store')}")
-        if hasattr(request.user, 'current_store'):
-            logger.info(f"Current store: {request.user.current_store}")
-        
-        # ✅ ПРОВЕРЯЕМ НЕСКОЛЬКИМИ СПОСОБАМИ
+        # Получаем текущий магазин
         current_store = None
         store_role = None
         
-        # Способ 1: Из атрибутов пользователя (установлено middleware)
         if hasattr(request.user, 'current_store') and request.user.current_store:
             current_store = request.user.current_store
             store_role = getattr(request.user, 'store_role', 'unknown')
-            logger.info(f"✅ Store from middleware: {current_store.name}")
         else:
-            # Способ 2: Напрямую из базы
             store_membership = StoreEmployee.objects.filter(
                 user=request.user,
                 is_active=True
@@ -458,59 +449,55 @@ class CreateUserForStoreView(APIView):
             if store_membership:
                 current_store = store_membership.store
                 store_role = store_membership.role
-                logger.info(f"✅ Store from DB: {current_store.name}")
             else:
-                logger.error(f"❌ No store found for user {request.user.username}")
                 return Response(
-                    {
-                        'error': 'Пользователь не привязан к магазину',
-                        'debug_info': {
-                            'user_id': request.user.id,
-                            'username': request.user.username,
-                            'has_current_store_attr': hasattr(request.user, 'current_store'),
-                            'store_memberships_count': StoreEmployee.objects.filter(user=request.user).count()
-                        }
-                    },
+                    {'error': 'Пользователь не привязан к магазину'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
         
-        # ✅ ПРОВЕРЯЕМ ПРАВА
+        # Проверяем права
         if store_role not in ['owner', 'admin']:
             return Response(
                 {'error': f'У вас нет прав для создания пользователей. Ваша роль: {store_role}'},
                 status=status.HTTP_403_FORBIDDEN
             )
         
-        # ✅ СОЗДАЕМ ПОЛЬЗОВАТЕЛЯ
         with transaction.atomic():
             try:
-                user_data = {
-                    'username': request.data.get('username'),
-                    'email': request.data.get('email'),
-                    'first_name': request.data.get('first_name', ''),
-                    'last_name': request.data.get('last_name', ''),
-                    'password': request.data.get('password')
-                }
+                # Извлекаем данные
+                username = request.data.get('username')
+                email = request.data.get('email')
+                password = request.data.get('password')
+                first_name = request.data.get('first_name', '')
+                last_name = request.data.get('last_name', '')
+                phone = request.data.get('phone', '')
+                sex = request.data.get('sex', '')
+                role = request.data.get('store_role', 'cashier')
                 
                 # Валидация
-                if not user_data['username'] or not user_data['email'] or not user_data['password']:
+                if not username or not email or not password:
                     return Response(
                         {'error': 'username, email и password обязательны'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 
-                if User.objects.filter(username=user_data['username']).exists():
+                if User.objects.filter(username=username).exists():
                     return Response(
                         {'error': 'Пользователь с таким именем уже существует'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
                 
                 # Создаем пользователя
-                user = User.objects.create_user(**user_data)
+                user = User.objects.create_user(
+                    username=username,
+                    email=email,
+                    password=password,
+                    first_name=first_name,
+                    last_name=last_name
+                )
                 logger.info(f"✅ User created: {user.username}")
                 
                 # Привязываем к магазину
-                role = request.data.get('store_role', 'cashier')
                 store_employee = StoreEmployee.objects.create(
                     store=current_store,
                     user=user,
@@ -518,15 +505,17 @@ class CreateUserForStoreView(APIView):
                 )
                 logger.info(f"✅ StoreEmployee created: {user.username} -> {current_store.name} ({role})")
                 
-                # Создаем Employee если есть модель
+                # Создаем Employee с СОХРАНЕНИЕМ ПАРОЛЯ
                 try:
                     from users.models import Employee
                     Employee.objects.create(
                         user=user,
                         role=role,
-                        phone=request.data.get('phone', '')
+                        phone=phone,
+                        sex=sex,
+                        plain_password=password  # ← СОХРАНЯЕМ ПАРОЛЬ
                     )
-                    logger.info(f"✅ Employee record created")
+                    logger.info(f"✅ Employee record created with password")
                 except ImportError:
                     logger.warning("Employee model not found")
                 except Exception as e:
@@ -535,7 +524,6 @@ class CreateUserForStoreView(APIView):
                 # Добавляем в группу
                 group, _ = Group.objects.get_or_create(name=role)
                 user.groups.add(group)
-                logger.info(f"✅ Added to group: {role}")
                 
                 return Response({
                     'success': True,
@@ -544,14 +532,15 @@ class CreateUserForStoreView(APIView):
                         'username': user.username,
                         'email': user.email,
                         'first_name': user.first_name,
-                        'last_name': user.last_name
+                        'last_name': user.last_name,
+                        'password': password  # Возвращаем пароль в ответе
                     },
                     'store': {
                         'id': str(current_store.id),
                         'name': current_store.name
                     },
                     'role': role,
-                    'message': f'Пользователь {user.username} создан и привязан к магазину {current_store.name}'
+                    'message': f'Пользователь {user.username} создан с паролем: {password}'
                 }, status=status.HTTP_201_CREATED)
                 
             except Exception as e:
@@ -560,7 +549,6 @@ class CreateUserForStoreView(APIView):
                     {'error': f'Ошибка создания пользователя: {str(e)}'},
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
-
 
 class SwitchStoreView(APIView):
     """

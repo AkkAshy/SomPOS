@@ -20,7 +20,7 @@ from reportlab.lib.fonts import addMapping
 from stores.mixins import StoreOwnedModel, StoreOwnedManager
 
 
-pdfmetrics.registerFont(TTFont('Arial', r'C:\Windows\Fonts\arial.ttf'))
+pdfmetrics.registerFont(TTFont('DejaVuSans', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'))
 addMapping('DejaVuSans', 0, 0, 'DejaVuSans')
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('inventory')

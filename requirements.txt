@@ -6,8 +6,10 @@ charset-normalizer==3.4.2
 colorama==0.4.6
 Django==5.2.1
 django-cors-headers==4.7.0
+django-filter==25.1
 djangorestframework==3.16.0
 djangorestframework_simplejwt==5.5.0
+dotenv==0.9.9
 drf-yasg==1.21.10
 idna==3.10
 importlib_resources==6.5.2
@@ -16,10 +18,12 @@ packaging==25.0
 pillow==11.2.1
 PyJWT==2.9.0
 python-barcode==0.15.1
+python-dotenv==1.1.1
 python-escpos==3.1
 pytz==2025.2
 PyYAML==6.0.2
 qrcode==8.2
+reportlab==4.4.3
 requests==2.32.3
 setuptools==80.8.0
 six==1.17.0

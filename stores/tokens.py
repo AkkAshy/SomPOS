@@ -1,6 +1,7 @@
-# stores/tokens.py
-from rest_framework_simplejwt.tokens import RefreshToken
+# stores/tokens.py - убедитесь что класс выглядит так:
+
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework_simplejwt.tokens import RefreshToken
 from .models import StoreEmployee
 
 class StoreTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -29,6 +30,27 @@ class StoreTokenObtainPairSerializer(TokenObtainPairSerializer):
         token['full_name'] = user.get_full_name()
         
         return token
+    
+    def validate(self, attrs):
+        data = super().validate(attrs)
+        
+        # Получаем токены
+        refresh = self.get_token(self.user)
+        data['refresh'] = str(refresh)
+        data['access'] = str(refresh.access_token)
+        
+        # Добавляем информацию о магазине в ответ
+        store_membership = StoreEmployee.objects.filter(
+            user=self.user,
+            is_active=True
+        ).select_related('store').first()
+        
+        if store_membership:
+            data['store_id'] = str(store_membership.store.id)
+            data['store_name'] = store_membership.store.name
+            data['store_role'] = store_membership.role
+        
+        return data
 
 
 def get_tokens_for_user_and_store(user, store_id=None):

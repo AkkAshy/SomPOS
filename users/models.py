@@ -18,7 +18,15 @@ class Employee(models.Model):
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='cashier')
     phone = models.CharField(max_length=20, blank=True, null=True)
     photo = models.ImageField(upload_to='employee_photos/', blank=True, null=True)
+    sex = models.CharField(max_length=10, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    plain_password = models.CharField(
+        max_length=128, 
+        blank=True, 
+        null=True,
+        verbose_name="Пароль",
+        help_text="Пароль в открытом виде (только для администраторов)"
+    )
 
     class Meta:
         verbose_name = _('Сотрудник')

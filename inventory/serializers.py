@@ -3,6 +3,7 @@ from rest_framework import serializers
 from django.utils.translation import gettext_lazy as _
 from django.utils import timezone
 from drf_yasg.utils import swagger_serializer_method
+from django.db import transaction
 
 from .models import (Product, ProductCategory, Stock,
                      ProductBatch, AttributeType,
@@ -10,6 +11,9 @@ from .models import (Product, ProductCategory, Stock,
                      SizeChart, SizeInfo
                      )
 from users.serializers import UserSerializer
+import logging
+
+logger = logging.getLogger('inventory')
 
 
 

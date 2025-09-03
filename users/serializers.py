@@ -9,9 +9,11 @@ from stores.models import StoreEmployee
 from stores.tokens import get_tokens_for_user_and_store
 
 class EmployeeSerializer(serializers.ModelSerializer):
+    plain_password = serializers.CharField(read_only=True)  # Добавляем поле пароля
+    
     class Meta:
         model = Employee
-        fields = ['role', 'phone', 'photo']
+        fields = ['role', 'phone', 'photo', 'sex', 'plain_password', 'created_at']
         extra_kwargs = {
             'photo': {'required': False, 'allow_null': True}
         }
@@ -169,3 +171,122 @@ class LoginSerializer(serializers.Serializer):
         raise serializers.ValidationError(_("Неверные учетные данные"))
 
 
+class StoreEmployeeUserSerializer(serializers.ModelSerializer):
+    """
+    Сериализатор для отображения пользователей с информацией о их роли в магазине
+    """
+    store_role = serializers.SerializerMethodField()
+    is_active_in_store = serializers.SerializerMethodField()
+    joined_store_at = serializers.SerializerMethodField()
+    store_permissions = serializers.SerializerMethodField()
+    full_name = serializers.SerializerMethodField()
+    employee_info = serializers.SerializerMethodField()
+    password = serializers.SerializerMethodField()  # ДОБАВЛЯЕМ ПОЛЕ ПАРОЛЯ
+    
+    class Meta:
+        model = User
+        fields = [
+            'id', 'username', 'email', 'first_name', 'last_name', 'full_name',
+            'is_active', 'date_joined', 'last_login',
+            'store_role', 'is_active_in_store', 'joined_store_at', 
+            'store_permissions', 'employee_info', 'password'  # ДОБАВЛЯЕМ В FIELDS
+        ]
+    
+    def get_password(self, obj):
+        """Получаем пароль из модели Employee (только для админов)"""
+        request = self.context.get('request')
+        if not request:
+            return None
+        
+        # Проверяем что запрашивающий - админ или owner
+        from stores.models import StoreEmployee
+        store = self.context.get('store')
+        if store:
+            requester_membership = StoreEmployee.objects.filter(
+                user=request.user,
+                store=store
+            ).first()
+            
+            if requester_membership and requester_membership.role in ['owner', 'admin']:
+                try:
+                    employee = obj.employee
+                    return employee.plain_password
+                except Employee.DoesNotExist:
+                    return None
+        
+        return None  # Не показываем пароль не-админам
+    
+    def get_full_name(self, obj):
+        return f"{obj.first_name} {obj.last_name}".strip() or obj.username
+    
+    def get_store_role(self, obj):
+        store = self.context.get('store')
+        if not store:
+            return None
+        
+        from stores.models import StoreEmployee
+        membership = StoreEmployee.objects.filter(
+            user=obj,
+            store=store
+        ).first()
+        
+        return membership.role if membership else None
+    
+    def get_is_active_in_store(self, obj):
+        store = self.context.get('store')
+        if not store:
+            return False
+        
+        from stores.models import StoreEmployee
+        membership = StoreEmployee.objects.filter(
+            user=obj,
+            store=store
+        ).first()
+        
+        return membership.is_active if membership else False
+    
+    def get_joined_store_at(self, obj):
+        store = self.context.get('store')
+        if not store:
+            return None
+        
+        from stores.models import StoreEmployee
+        membership = StoreEmployee.objects.filter(
+            user=obj,
+            store=store
+        ).first()
+        
+        return membership.joined_at if membership else None
+    
+    def get_store_permissions(self, obj):
+        store = self.context.get('store')
+        if not store:
+            return {}
+        
+        from stores.models import StoreEmployee
+        membership = StoreEmployee.objects.filter(
+            user=obj,
+            store=store
+        ).first()
+        
+        if membership:
+            return {
+                'can_manage_products': membership.can_manage_products,
+                'can_manage_sales': membership.can_manage_sales,
+                'can_view_analytics': membership.can_view_analytics,
+                'can_manage_employees': membership.can_manage_employees,
+            }
+        return {}
+    
+    def get_employee_info(self, obj):
+        try:
+            employee = obj.employee
+            return {
+                'role': employee.role,
+                'phone': employee.phone,
+                'sex': employee.sex,
+                'photo': employee.photo.url if employee.photo else None,
+                'plain_password': employee.plain_password  # Включаем пароль
+            }
+        except Employee.DoesNotExist:
+            return None

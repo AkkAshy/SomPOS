@@ -223,30 +223,6 @@ class ProductViewSet(StoreViewSetMixin, ModelViewSet):
         """
         Создание товаров с множественными размерами.
         Каждый размер создается как отдельный Product с уникальным штрих-кодом.
-
-        Пример запроса:
-        {
-            "name": "Футболка Армани",
-            "category": 1,
-            "sale_price": 150000.00,
-            "unit": "piece",
-            "batch_info": [
-                {
-                    "size_id": 2,
-                    "quantity": 20,
-                    "purchase_price": 100000.00,
-                    "supplier": "Армани Official",
-                    "expiration_date": null
-                },
-                {
-                    "size_id": 4,
-                    "quantity": 30,
-                    "purchase_price": 100000.00,
-                    "supplier": "Армани Official",
-                    "expiration_date": null
-                }
-            ]
-        }
         """
         # Проверяем аутентификацию
         if not request.user.is_authenticated:
@@ -254,13 +230,28 @@ class ProductViewSet(StoreViewSetMixin, ModelViewSet):
                 'error': _('Необходима аутентификация')
             }, status=status.HTTP_401_UNAUTHORIZED)
 
+        # ✅ ВАЖНО: Получаем текущий магазин
+        current_store = self.get_current_store()
+        if not current_store:
+            return Response({
+                'error': 'Магазин не определен. Переавторизуйтесь или выберите магазин.',
+                'debug_info': {
+                    'user': request.user.username,
+                    'has_current_store': hasattr(request.user, 'current_store'),
+                    'current_store_value': getattr(request.user, 'current_store', None)
+                }
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         serializer = ProductMultiSizeCreateSerializer(data=request.data)
 
         if serializer.is_valid():
             try:
                 with transaction.atomic():
-                    # ✅ Передаем created_by
-                    created_products = serializer.save(created_by=request.user)
+                    # ✅ Передаем created_by И store
+                    created_products = serializer.save(
+                        created_by=request.user,
+                        store=current_store  # ← ДОБАВЛЕНО
+                    )
 
                 # Сериализуем созданные товары для ответа
                 products_data = ProductSerializer(created_products, many=True, context={'request': request}).data

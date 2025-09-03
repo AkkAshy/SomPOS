@@ -469,3 +469,301 @@ class UserDetailView(APIView):
         user = get_object_or_404(User, pk=pk)
         serializer = UserSerializer(user)
         return Response(serializer.data)
+    
+    def patch(self, request, pk):
+        from stores.models import StoreEmployee
+        from .models import Employee
+        
+        # Получаем текущий магазин
+        current_store = self._get_current_store(request)
+        
+        if not current_store:
+            return Response(
+                {"error": "У вас нет доступа к магазину"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Проверяем права (только owner и admin могут редактировать)
+        user_membership = StoreEmployee.objects.filter(
+            user=request.user,
+            store=current_store
+        ).first()
+        
+        if not user_membership or user_membership.role not in ['owner', 'admin']:
+            return Response(
+                {"error": "У вас нет прав для редактирования сотрудников"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Находим сотрудника
+        try:
+            store_employee = StoreEmployee.objects.get(
+                user_id=pk,
+                store=current_store
+            )
+        except StoreEmployee.DoesNotExist:
+            return Response(
+                {"error": "Пользователь не найден в этом магазине"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        user = store_employee.user
+        
+        # Обновляем данные пользователя
+        if 'first_name' in request.data:
+            user.first_name = request.data['first_name']
+        if 'last_name' in request.data:
+            user.last_name = request.data['last_name']
+        if 'email' in request.data:
+            user.email = request.data['email']
+        
+        # ОБНОВЛЯЕМ ПАРОЛЬ
+        if 'password' in request.data:
+            new_password = request.data['password']
+            if len(new_password) < 6:
+                return Response(
+                    {"error": "Пароль должен быть не менее 6 символов"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Меняем пароль пользователя
+            user.set_password(new_password)
+            
+            # Обновляем пароль в Employee
+            try:
+                employee = user.employee
+                employee.plain_password = new_password
+                employee.save()
+                logger.info(f"Password updated for {user.username} by {request.user.username}")
+            except Employee.DoesNotExist:
+                # Создаем Employee если не существует
+                Employee.objects.create(
+                    user=user,
+                    role=store_employee.role,
+                    plain_password=new_password
+                )
+        
+        user.save()
+        
+        # Обновляем роль и статус в магазине
+        if 'role' in request.data:
+            store_employee.role = request.data['role']
+        if 'is_active' in request.data:
+            store_employee.is_active = request.data['is_active']
+        
+        # Обновляем данные Employee
+        if 'phone' in request.data or 'sex' in request.data:
+            try:
+                employee = user.employee
+                if 'phone' in request.data:
+                    employee.phone = request.data['phone']
+                if 'sex' in request.data:
+                    employee.sex = request.data['sex']
+                employee.save()
+            except Employee.DoesNotExist:
+                Employee.objects.create(
+                    user=user,
+                    role=store_employee.role,
+                    phone=request.data.get('phone', ''),
+                    sex=request.data.get('sex', '')
+                )
+        
+        store_employee.save()
+        
+        # Возвращаем обновленные данные
+        return Response({
+            "message": "Информация о сотруднике обновлена",
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "password": user.employee.plain_password if hasattr(user, 'employee') else None
+            }
+        })
+    
+# users/views.py - добавьте этот класс
+
+from rest_framework_simplejwt.views import TokenObtainPairView as BaseTokenObtainPairView
+from stores.tokens import StoreTokenObtainPairSerializer
+
+class CustomTokenObtainPairView(BaseTokenObtainPairView):
+    """
+    Кастомный view для логина, который возвращает токены с информацией о магазине
+    """
+    serializer_class = StoreTokenObtainPairSerializer
+    
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        
+        if response.status_code == 200:
+            # Добавляем информацию о пользователе и магазине в ответ
+            from django.contrib.auth import authenticate
+            from stores.models import StoreEmployee
+            
+            username = request.data.get('username')
+            password = request.data.get('password')
+            user = authenticate(username=username, password=password)
+            
+            if user:
+                # Получаем информацию о магазинах
+                store_memberships = StoreEmployee.objects.filter(
+                    user=user,
+                    is_active=True
+                ).select_related('store')
+                
+                # Берем первый магазин
+                current_membership = store_memberships.first()
+                
+                # Список всех доступных магазинов
+                available_stores = []
+                for membership in store_memberships:
+                    available_stores.append({
+                        'id': str(membership.store.id),
+                        'name': membership.store.name,
+                        'role': membership.role,
+                        'is_current': membership == current_membership
+                    })
+                
+                # Добавляем информацию в ответ
+                response.data['user'] = {
+                    'id': user.id,
+                    'username': user.username,
+                    'email': user.email,
+                    'first_name': user.first_name,
+                    'last_name': user.last_name,
+                    'full_name': user.get_full_name() or user.username
+                }
+                
+                if current_membership:
+                    response.data['current_store'] = {
+                        'id': str(current_membership.store.id),
+                        'name': current_membership.store.name,
+                        'role': current_membership.role
+                    }
+                
+                response.data['available_stores'] = available_stores
+        
+        return response
+    
+class CustomLoginView(APIView):
+    """
+    Кастомный логин с полной информацией о магазине
+    """
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+    
+    @swagger_auto_schema(
+        operation_description="Вход в систему с получением токенов и информации о магазине",
+        request_body=openapi.Schema(
+            type=openapi.TYPE_OBJECT,
+            required=['username', 'password'],
+            properties={
+                'username': openapi.Schema(type=openapi.TYPE_STRING, example='testadmin'),
+                'password': openapi.Schema(type=openapi.TYPE_STRING, example='secure123'),
+                'store_id': openapi.Schema(
+                    type=openapi.TYPE_STRING, 
+                    format='uuid',
+                    description='ID магазина (опционально)'
+                )
+            }
+        ),
+        responses={
+            200: openapi.Response('Успешный вход'),
+            401: 'Неверные учетные данные'
+        }
+    )
+    def post(self, request):
+        from django.contrib.auth import authenticate
+        from stores.models import StoreEmployee
+        from stores.tokens import get_tokens_for_user_and_store
+        
+        username = request.data.get('username')
+        password = request.data.get('password')
+        store_id = request.data.get('store_id')
+        
+        if not username or not password:
+            return Response(
+                {'error': 'Username и password обязательны'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Аутентификация
+        user = authenticate(username=username, password=password)
+        
+        if not user:
+            return Response(
+                {'error': 'Неверные учетные данные'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        
+        if not user.is_active:
+            return Response(
+                {'error': 'Аккаунт деактивирован'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        
+        # Получаем магазины пользователя
+        store_memberships = StoreEmployee.objects.filter(
+            user=user,
+            is_active=True
+        ).select_related('store')
+        
+        if not store_memberships.exists():
+            return Response(
+                {'error': 'Пользователь не привязан ни к одному магазину'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Определяем текущий магазин
+        if store_id:
+            current_membership = store_memberships.filter(store_id=store_id).first()
+            if not current_membership:
+                return Response(
+                    {'error': 'У вас нет доступа к указанному магазину'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        else:
+            current_membership = store_memberships.first()
+        
+        # Генерируем токены с информацией о магазине
+        tokens = get_tokens_for_user_and_store(user, str(current_membership.store.id))
+        
+        # Формируем список всех доступных магазинов
+        available_stores = []
+        for membership in store_memberships:
+            available_stores.append({
+                'id': str(membership.store.id),
+                'name': membership.store.name,
+                'role': membership.role,
+                'is_current': str(membership.store.id) == str(current_membership.store.id)
+            })
+        
+        # Проверяем токены на наличие информации о магазине
+        import jwt
+        try:
+            decoded_access = jwt.decode(tokens['access'], options={"verify_signature": False})
+            logger.info(f"Access token содержит: store_id={decoded_access.get('store_id')}, store_name={decoded_access.get('store_name')}")
+        except Exception as e:
+            logger.error(f"Ошибка декодирования токена: {e}")
+        
+        return Response({
+            'access': tokens['access'],
+            'refresh': tokens['refresh'],
+            'user': {
+                'id': user.id,
+                'username': user.username,
+                'email': user.email,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+                'full_name': user.get_full_name() or user.username
+            },
+            'current_store': {
+                'id': str(current_membership.store.id),
+                'name': current_membership.store.name,
+                'role': current_membership.role
+            },
+            'available_stores': available_stores,
+            'message': 'Успешный вход в систему'
+        })
