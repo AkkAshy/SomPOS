@@ -21,11 +21,32 @@ class Employee(models.Model):
     sex = models.CharField(max_length=10, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     plain_password = models.CharField(
-        max_length=128, 
-        blank=True, 
+        max_length=128,
+        blank=True,
         null=True,
         verbose_name="Пароль",
         help_text="Пароль в открытом виде (только для администраторов)"
+    )
+
+    # ✅ ПРАВИЛЬНАЯ СВЯЗЬ С UUID Store
+    store = models.ForeignKey(
+        'stores.Store',
+        on_delete=models.CASCADE,
+        related_name='employees',
+        verbose_name=_('Магазин'),
+        null=True,    # Временно разрешаем NULL для безопасной миграции
+        blank=True,
+        help_text=_('Магазин, к которому привязан сотрудник')
+    )
+
+    # ✅ Many-to-Many для доступа к нескольким магазинам
+    accessible_stores = models.ManyToManyField(
+        'stores.Store',
+        related_name='accessible_employees',
+        blank=True,
+        null=True,
+        verbose_name=_('Доступные магазины'),
+        help_text=_('Магазины, к которым сотрудник имеет доступ')
     )
 
     class Meta:
@@ -33,9 +54,19 @@ class Employee(models.Model):
         verbose_name_plural = _('Сотрудники')
 
     def __str__(self):
-        return f"{self.user.get_full_name()} ({self.role})"
+        return f"{self.user.get_full_name()} ({self.role}) - {self.store.name if self.store else 'Без магазина'}"
 
-@receiver(post_save, sender=Employee)  # Сигнал после сохранения Employee
+    def get_current_store(self):
+        """Получить основной магазин сотрудника"""
+        return self.store
+
+    def has_access_to_store(self, store):
+        """Проверить, имеет ли сотрудник доступ к магазину"""
+        if self.role == 'admin':
+            return True  # Админы имеют доступ ко всем магазинам
+        return self.store == store or self.accessible_stores.filter(id=store.id).exists()
+
+@receiver(post_save, sender=Employee)
 def assign_group_to_user(sender, instance, created, **kwargs):
     # Получаем или создаём группу, соответствующую роли
     group, _ = Group.objects.get_or_create(name=instance.role)

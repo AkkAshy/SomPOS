@@ -72,13 +72,30 @@ class SizeInfoPagination(LimitOffsetPagination):
             'results': data
         })
 
+class CustomPagination(LimitOffsetPagination):
+    """
+    Кастомная пагинация с настраиваемыми параметрами
+    """
+    default_limit = 20
+    limit_query_param = 'limit'
+    offset_query_param = 'offset'
+    max_limit = 100
 
+    def get_paginated_response(self, data):
+        return Response({
+            'count': self.count,
+            'limit': self.limit,
+            'offset': self.offset,
+            'next': self.get_next_link(),
+            'previous': self.get_previous_link(),
+            'results': data
+        })
 
 class ProductCategoryViewSet(StoreViewSetMixin, ModelViewSet):
     """
     ViewSet для управления категориями товаров
     """
-    pagination_class = pagination.PageNumberPagination
+    pagination_class = CustomPagination
     queryset = ProductCategory.objects.all()
     serializer_class = ProductCategorySerializer
     filter_backends = [SearchFilter, OrderingFilter]
@@ -90,7 +107,7 @@ class ProductCategoryViewSet(StoreViewSetMixin, ModelViewSet):
     # def list(self, request, *args, **kwargs):
     #     return super().list(request, *args, **kwargs)
 
-  
+
 
     # def create(self, request, *args, **kwargs):
     #     return super().create(request, *args, **kwargs)
@@ -298,7 +315,7 @@ class ProductViewSet(StoreViewSetMixin, ModelViewSet):
 
         # Получаем текущий магазин
         current_store = self.get_current_store() if hasattr(self, 'get_current_store') else getattr(request.user, 'current_store', None)
-        
+
         if not current_store:
             return Response({
                 'error': 'Магазин не определен. Переавторизуйтесь.',
@@ -344,7 +361,7 @@ class ProductViewSet(StoreViewSetMixin, ModelViewSet):
                 }, status=status.HTTP_200_OK)
 
         # ✅ СОЗДАЕМ НОВЫЙ ТОВАР - ПРАВИЛЬНАЯ ПОСЛЕДОВАТЕЛЬНОСТЬ
-        
+
         # 1. Валидируем данные
         serializer = self.get_serializer(data=request.data)
         if not serializer.is_valid():
@@ -353,7 +370,7 @@ class ProductViewSet(StoreViewSetMixin, ModelViewSet):
         # 2. Создаем товар через perform_create (установит store автоматически)
         self.perform_create(serializer)
         product = serializer.instance
-        
+
         # 3. Теперь у product есть store, можем создать Stock вручную если нужно
         if not hasattr(product, 'stock'):
             try:
@@ -415,7 +432,7 @@ class ProductViewSet(StoreViewSetMixin, ModelViewSet):
             'message': _('Товар успешно создан'),
             'action': 'product_created'
         }, status=status.HTTP_201_CREATED)
-    
+
     @transaction.atomic
     def update(self, request, *args, **kwargs):
         """
@@ -482,16 +499,40 @@ class ProductViewSet(StoreViewSetMixin, ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Ищем только в текущем магазине
-        if hasattr(request.user, 'current_store'):
-            product = Product.objects.filter(
-                store=request.user.current_store,  # ← ДОБАВИТЬ фильтр
-                barcode=barcode
-            ).select_related('category', 'stock').first()
-        else:
-            product = None
+        # ✅ ИСПРАВЛЕНИЕ: Используем get_current_store() как в других методах
+        current_store = self.get_current_store()
+
+        if not current_store:
+            return Response({
+                'error': 'Магазин не определен. Переавторизуйтесь или выберите магазин.',
+                'debug_info': {
+                    'user': request.user.username,
+                    'has_current_store': hasattr(request.user, 'current_store'),
+                    'current_store_value': getattr(request.user, 'current_store', None)
+                }
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # ✅ ИСПРАВЛЕНИЕ: Добавляем логирование для отладки
+        logger.info(f"🔍 Scanning barcode: '{barcode}' in store: {current_store.name} (ID: {current_store.id})")
+
+        # Ищем товар в текущем магазине
+        product = Product.objects.filter(
+            store=current_store,
+            barcode=barcode
+        ).select_related('category', 'stock').first()
+
+        # ✅ ИСПРАВЛЕНИЕ: Дополнительная отладочная информация
+        if not product:
+            # Проверяем, есть ли товар с таким штрих-кодом в других магазинах
+            other_stores_count = Product.objects.filter(barcode=barcode).exclude(store=current_store).count()
+            all_products_count = Product.objects.filter(barcode=barcode).count()
+
+            logger.warning(f"❌ Product not found. Barcode: '{barcode}', Current store: {current_store.id}, "
+                          f"Products with this barcode in other stores: {other_stores_count}, "
+                          f"Total products with this barcode: {all_products_count}")
 
         if product:
+            logger.info(f"✅ Product found: {product.name} (ID: {product.id})")
             serializer = self.get_serializer(product)
             return Response({
                 'found': True,
@@ -499,19 +540,19 @@ class ProductViewSet(StoreViewSetMixin, ModelViewSet):
                 'message': _('Товар найден')
             })
         else:
-            # Товар не найден, возвращаем категории ТЕКУЩЕГО МАГАЗИНА
-            if hasattr(request.user, 'current_store'):
-                categories = ProductCategory.objects.filter(
-                    store=request.user.current_store  # ← ДОБАВИТЬ фильтр
-                )
-            else:
-                categories = ProductCategory.objects.none()
+            # Товар не найден, возвращаем категории текущего магазина
+            categories = ProductCategory.objects.filter(store=current_store)
 
             return Response({
                 'found': False,
                 'barcode': barcode,
                 'categories': ProductCategorySerializer(categories, many=True).data,
-                'message': _('Товар не найден. Создайте новый товар.')
+                'message': _('Товар не найден. Создайте новый товар.'),
+                'debug_info': {
+                    'current_store_id': current_store.id,
+                    'current_store_name': current_store.name,
+                    'barcode_searched': barcode
+                }
             })
 
     @action(detail=True, methods=['post'])
