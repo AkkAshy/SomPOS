@@ -1,4 +1,3 @@
-# analytics/views.py
 from rest_framework import viewsets, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -21,8 +20,8 @@ from .funcs import get_date_range
 from .pagination import OptionalPagination
 
 from inventory.models import ProductBatch
+from stores.mixins import StoreViewSetMixin  # ← ДОБАВЛЯЕМ МИКСИН
 import logging
-
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +30,12 @@ class AnalyticsPermission(permissions.BasePermission):
     def has_permission(self, request, view):
         return request.user.groups.filter(name__in=['admin', 'manager']).exists()
 
-class SalesAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
+
+class SalesAnalyticsViewSet(StoreViewSetMixin, viewsets.ReadOnlyModelViewSet):  # ← ДОБАВЛЯЕМ МИКСИН
     """
     Простой ViewSet для аналитики продаж и закупок
     """
-    queryset = SalesSummary.objects.all()
+    queryset = SalesSummary.objects.all()  # ← ДОБАВЛЯЕМ БАЗОВЫЙ QUERYSET
     serializer_class = SalesSummarySerializer
     permission_classes = [permissions.IsAuthenticated, AnalyticsPermission]
     pagination_class = OptionalPagination
@@ -74,6 +74,18 @@ class SalesAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
         """
         Простая финансовая сводка: сколько потратили на закупки и сколько заработали
         """
+        # ✅ ПОЛУЧАЕМ ТЕКУЩИЙ МАГАЗИН
+        current_store = self.get_current_store()
+        if not current_store:
+            return Response({
+                'error': 'Магазин не определен. Переавторизуйтесь или выберите магазин.',
+                'debug_info': {
+                    'user': request.user.username,
+                    'has_current_store': hasattr(request.user, 'current_store'),
+                    'current_store_value': getattr(request.user, 'current_store', None)
+                }
+            }, status=400)
+
         start_date = request.query_params.get('start_date')
         end_date = request.query_params.get('end_date', timezone.now().date())
         cashier_id = request.query_params.get('cashier')
@@ -98,8 +110,8 @@ class SalesAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
             except ValueError:
                 cashier_id = None
 
-        # === ПРОДАЖИ ===
-        sales_qs = self.get_queryset()
+        # === ПРОДАЖИ (ТОЛЬКО ТЕКУЩИЙ МАГАЗИН) ===
+        sales_qs = SalesSummary.objects.filter(store=current_store)  # ← ФИЛЬТР ПО МАГАЗИНУ
 
         if start_date:
             sales_qs = sales_qs.filter(date__gte=start_date)
@@ -128,21 +140,16 @@ class SalesAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
 
         sales_revenue = sales_totals['total_amount'] or Decimal('0.00')
 
-        # === ЗАКУПКИ ===
+        # === ЗАКУПКИ (ТОЛЬКО ТЕКУЩИЙ МАГАЗИН) ===
         purchase_qs = ProductBatch.objects.filter(
-            purchase_price__isnull=False  # Только партии с указанной закупочной ценой
+            store=current_store,  # ← ФИЛЬТР ПО МАГАЗИНУ
+            purchase_price__isnull=False
         )
 
         if start_date:
             purchase_qs = purchase_qs.filter(created_at__date__gte=start_date)
         if end_date:
             purchase_qs = purchase_qs.filter(created_at__date__lte=end_date)
-
-        # Считаем общую сумму закупок
-        purchase_totals = purchase_qs.aggregate(
-            total_spent=Sum('purchase_price') * Sum('quantity') / Count('id'),  # Неточно, исправим
-            total_batches=Count('id')
-        )
 
         # Правильный расчет суммы закупок
         total_purchase_cost = Decimal('0.00')
@@ -155,7 +162,6 @@ class SalesAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
                 total_purchase_quantity += batch.quantity
 
         # === РАСЧЕТ ПРИБЫЛИ ===
-        # Простая прибыль = Выручка - Потрачено на закупки
         simple_profit = sales_revenue - total_purchase_cost
 
         # Рентабельность
@@ -165,6 +171,12 @@ class SalesAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
             profit_margin = Decimal('0.00')
 
         response_data = {
+            # Информация о магазине
+            'store': {
+                'id': str(current_store.id),
+                'name': current_store.name
+            },
+
             # Продажи
             'sales': {
                 'total_revenue': sales_revenue,
@@ -197,22 +209,19 @@ class SalesAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
             }
         }
 
-        logger.info(f"Simple financial summary: revenue={sales_revenue}, costs={total_purchase_cost}, profit={simple_profit}")
+        logger.info(f"Financial summary for store {current_store.name}: revenue={sales_revenue}, costs={total_purchase_cost}, profit={simple_profit}")
         return Response(response_data)
 
-    @swagger_auto_schema(
-        operation_description="Детализация закупок за период",
-        manual_parameters=[
-            openapi.Parameter('start_date', openapi.IN_QUERY, type=openapi.TYPE_STRING, format='date'),
-            openapi.Parameter('end_date', openapi.IN_QUERY, type=openapi.TYPE_STRING, format='date'),
-            openapi.Parameter('product_id', openapi.IN_QUERY, type=openapi.TYPE_INTEGER, description="Фильтр по товару")
-        ]
-    )
     @action(detail=False, methods=['get'])
     def purchases_detail(self, request):
         """
-        Детализация по закупкам
+        Детализация по закупкам (только текущий магазин)
         """
+        # ✅ ПОЛУЧАЕМ ТЕКУЩИЙ МАГАЗИН
+        current_store = self.get_current_store()
+        if not current_store:
+            return Response({'error': 'Магазин не определен'}, status=400)
+
         start_date = request.query_params.get('start_date')
         end_date = request.query_params.get('end_date', timezone.now().date())
         product_id = request.query_params.get('product_id')
@@ -230,12 +239,13 @@ class SalesAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
             except ValueError:
                 start_date = None
 
-        # Базовый queryset
+        # Базовый queryset С ФИЛЬТРОМ ПО МАГАЗИНУ
         batches_qs = ProductBatch.objects.select_related('product').filter(
+            store=current_store,  # ← ФИЛЬТР ПО МАГАЗИНУ
             purchase_price__isnull=False
         )
 
-        # Фильтры
+        # Остальные фильтры
         if start_date:
             batches_qs = batches_qs.filter(created_at__date__gte=start_date)
         if end_date:
@@ -269,6 +279,10 @@ class SalesAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
             })
 
         return Response({
+            'store': {
+                'id': str(current_store.id),
+                'name': current_store.name
+            },
             'purchases': purchases_data,
             'summary': {
                 'total_batches': len(purchases_data),
@@ -283,24 +297,22 @@ class SalesAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
             }
         })
 
-    @swagger_auto_schema(
-        operation_description="Оригинальная сводка по продажам",
-        manual_parameters=[
-            openapi.Parameter('start_date', openapi.IN_QUERY, type=openapi.TYPE_STRING, format='date'),
-            openapi.Parameter('end_date', openapi.IN_QUERY, type=openapi.TYPE_STRING, format='date'),
-            openapi.Parameter('cashier', openapi.IN_QUERY, type=openapi.TYPE_INTEGER)
-        ]
-    )
     @action(detail=False, methods=['get'])
     def summary(self, request):
         """
         Оригинальный метод summary (для обратной совместимости)
         """
+        # ✅ ПОЛУЧАЕМ ТЕКУЩИЙ МАГАЗИН
+        current_store = self.get_current_store()
+        if not current_store:
+            return Response({'error': 'Магазин не определен'}, status=400)
+
         start_date = request.query_params.get('start_date')
         end_date = request.query_params.get('end_date', timezone.now().date())
         cashier_id = request.query_params.get('cashier')
 
-        queryset = self.get_queryset()
+        # ФИЛЬТРУЕМ ПО МАГАЗИНУ
+        queryset = SalesSummary.objects.filter(store=current_store)
 
         if start_date:
             queryset = queryset.filter(date__gte=start_date)
@@ -332,17 +344,22 @@ class SalesAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
         return Response({
+            'store': {
+                'id': str(current_store.id),
+                'name': current_store.name
+            },
             'payment_summary': payment_summary,
             'total_amount': totals['total_amount'] or 0,
             'total_transactions': totals['total_transactions'] or 0,
             'total_items_sold': totals['total_items_sold'] or 0
         })
 
-class ProductAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
+
+class ProductAnalyticsViewSet(StoreViewSetMixin, viewsets.ReadOnlyModelViewSet):  # ← ДОБАВЛЯЕМ МИКСИН
     """
     ViewSet для аналитики товаров.
     """
-    queryset = ProductAnalytics.objects.select_related('product').all()
+    queryset = ProductAnalytics.objects.select_related('product').all()  # ← ДОБАВЛЯЕМ БАЗОВЫЙ QUERYSET
     serializer_class = ProductAnalyticsSerializer
     permission_classes = [permissions.IsAuthenticated, AnalyticsPermission]
     filter_backends = [DjangoFilterBackend, OrderingFilter]
@@ -360,11 +377,20 @@ class ProductAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
     )
     @action(detail=False, methods=['get'])
     def top_products(self, request):
+        # ✅ ПОЛУЧАЕМ ТЕКУЩИЙ МАГАЗИН
+        current_store = self.get_current_store()
+        if not current_store:
+            return Response({'error': 'Магазин не определен'}, status=400)
+
         limit = int(request.query_params.get('limit', 10))
         start_date = request.query_params.get('start_date')
         end_date = request.query_params.get('end_date', datetime.today().date())
 
-        queryset = self.get_queryset()
+        # ФИЛЬТРУЕМ ПО ТОВАРАМ ТЕКУЩЕГО МАГАЗИНА
+        queryset = ProductAnalytics.objects.filter(
+            product__store=current_store  # ← ФИЛЬТР ПО МАГАЗИНУ
+        )
+
         if start_date:
             queryset = queryset.filter(date__gte=start_date)
         if end_date:
@@ -376,15 +402,20 @@ class ProductAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
         ).order_by('-total_quantity')[:limit]
 
         return Response({
+            'store': {
+                'id': str(current_store.id),
+                'name': current_store.name
+            },
             'top_products': top_products,
             'limit': limit
         })
 
-class CustomerAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
+
+class CustomerAnalyticsViewSet(StoreViewSetMixin, viewsets.ReadOnlyModelViewSet):  # ← ДОБАВЛЯЕМ МИКСИН
     """
     ViewSet для аналитики клиентов.
     """
-    queryset = CustomerAnalytics.objects.select_related('customer').all()
+    queryset = CustomerAnalytics.objects.select_related('customer').all()  # ← ДОБАВЛЯЕМ БАЗОВЫЙ QUERYSET
     serializer_class = CustomerAnalyticsSerializer
     permission_classes = [permissions.IsAuthenticated, AnalyticsPermission]
     filter_backends = [DjangoFilterBackend, OrderingFilter]
@@ -402,11 +433,20 @@ class CustomerAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
     )
     @action(detail=False, methods=['get'])
     def top_customers(self, request):
+        # ✅ ПОЛУЧАЕМ ТЕКУЩИЙ МАГАЗИН
+        current_store = self.get_current_store()
+        if not current_store:
+            return Response({'error': 'Магазин не определен'}, status=400)
+
         limit = int(request.query_params.get('limit', 10))
         start_date = request.query_params.get('start_date')
         end_date = request.query_params.get('end_date', datetime.today().date())
 
-        queryset = self.get_queryset()
+        # ФИЛЬТРУЕМ ПО КЛИЕНТАМ ТЕКУЩЕГО МАГАЗИНА
+        queryset = CustomerAnalytics.objects.filter(
+            customer__store=current_store  # ← ФИЛЬТР ПО МАГАЗИНУ
+        )
+
         if start_date:
             queryset = queryset.filter(date__gte=start_date)
         if end_date:
@@ -419,13 +459,22 @@ class CustomerAnalyticsViewSet(viewsets.ReadOnlyModelViewSet):
         ).order_by('-total_purchases')[:limit]
 
         return Response({
+            'store': {
+                'id': str(current_store.id),
+                'name': current_store.name
+            },
             'top_customers': top_customers,
             'limit': limit
         })
 
 
-class TransactionsHistoryByDayView(APIView):
+class TransactionsHistoryByDayView(StoreViewSetMixin, APIView):  # ← ДОБАВЛЯЕМ МИКСИН
     def get(self, request):
+        # ✅ ПОЛУЧАЕМ ТЕКУЩИЙ МАГАЗИН
+        current_store = self.get_current_store()
+        if not current_store:
+            return Response({"error": "Магазин не определен"}, status=400)
+
         date_from = request.GET.get("date_from")
         date_to = request.GET.get("date_to")
 
@@ -434,20 +483,33 @@ class TransactionsHistoryByDayView(APIView):
 
         try:
             dates = get_date_range(date_from, date_to)
-            trasnactions_list = []
+            transactions_list = []
+
             for date in dates:
-                trasnactions = TransactionHistory.objects.filter(created_at__date=date).all()
-                trasnactions = FilteredTransactionHistorySerializer(trasnactions, many=True).data
-                if trasnactions:
+                # ФИЛЬТРУЕМ ПО МАГАЗИНУ
+                transactions = TransactionHistory.objects.filter(
+                    store=current_store,  # ← ФИЛЬТР ПО МАГАЗИНУ
+                    created_at__date=date
+                ).all()
+
+                transactions = FilteredTransactionHistorySerializer(transactions, many=True).data
+
+                if transactions:
                     amounts = 0
-                    for transaction in trasnactions:
+                    for transaction in transactions:
                         try:
                             amount = float(transaction["parsed_details"]["total_amount"])
                         except:
                             amount = 0
                         amounts += amount
-                    trasnactions_list.append({date: amounts})
+                    transactions_list.append({date: amounts})
 
-            return Response(trasnactions_list)
+            return Response({
+                'store': {
+                    'id': str(current_store.id),
+                    'name': current_store.name
+                },
+                'transactions_by_day': transactions_list
+            })
         except Exception as e:
             return Response({"error": str(e)})

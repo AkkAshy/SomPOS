@@ -22,6 +22,7 @@ def update_sales_analytics(sender, instance, created, **kwargs):
 
     # Обновляем или создаём сводку по продажам
     sales_summary, created = SalesSummary.objects.get_or_create(
+        store=instance.store,   # ✅ добавляем магазин
         date=date,
         payment_method=payment_method,
         defaults={

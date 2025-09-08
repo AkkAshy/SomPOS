@@ -34,38 +34,38 @@ def simple_store_register(request):
     ПРОСТАЯ регистрация магазина без DRF
     """
     logger.info("Simple store registration started")
-    
+
     try:
         # Парсим JSON
         data = json.loads(request.body.decode('utf-8'))
         logger.info(f"Registration data received: {list(data.keys())}")
-        
+
         # Базовая валидация
         required_fields = ['username', 'password', 'email', 'store_name', 'store_address']
         missing_fields = [field for field in required_fields if not data.get(field)]
-        
+
         if missing_fields:
             return JsonResponse({
                 'error': f'Отсутствуют обязательные поля: {", ".join(missing_fields)}'
             }, status=400)
-        
+
         # Проверяем существование пользователя
         if User.objects.filter(username=data['username']).exists():
             return JsonResponse({
                 'error': 'Пользователь с таким именем уже существует'
             }, status=400)
-        
+
         if User.objects.filter(email=data['email']).exists():
             return JsonResponse({
                 'error': 'Пользователь с таким email уже существует'
             }, status=400)
-        
+
         # Проверяем существование магазина
         if Store.objects.filter(name__iexact=data['store_name']).exists():
             return JsonResponse({
                 'error': 'Магазин с таким названием уже существует'
             }, status=400)
-        
+
         with transaction.atomic():
             # Создаем пользователя
             user = User.objects.create_user(
@@ -76,11 +76,11 @@ def simple_store_register(request):
                 password=data['password']
             )
             logger.info(f"User created: {user.username}")
-            
+
             # Добавляем в группу admin
             admin_group, created = Group.objects.get_or_create(name='admin')
             user.groups.add(admin_group)
-            
+
             # Создаем Employee если модель существует
             try:
                 from users.models import Employee
@@ -94,7 +94,7 @@ def simple_store_register(request):
                 logger.warning("Employee model not found, skipping")
             except Exception as e:
                 logger.error(f"Error creating Employee: {e}")
-            
+
             # Создаем магазин
             store = Store.objects.create(
                 name=data['store_name'],
@@ -105,7 +105,7 @@ def simple_store_register(request):
                 owner=user
             )
             logger.info(f"Store created: {store.name}")
-            
+
             # Создаем связь StoreEmployee
             store_employee = StoreEmployee.objects.create(
                 store=store,
@@ -113,10 +113,10 @@ def simple_store_register(request):
                 role='owner'
             )
             logger.info(f"StoreEmployee created: {user.username} -> {store.name}")
-            
+
             # Генерируем токены
             tokens = get_tokens_for_user_and_store(user, str(store.id))
-            
+
             response_data = {
                 'success': True,
                 'user': {
@@ -142,10 +142,10 @@ def simple_store_register(request):
                 'role': store_employee.role,
                 'message': 'Регистрация успешно завершена'
             }
-            
+
             logger.info(f"Registration completed successfully for {user.username}")
             return JsonResponse(response_data, status=201)
-            
+
     except json.JSONDecodeError:
         return JsonResponse({'error': 'Неверный формат JSON'}, status=400)
     except Exception as e:
@@ -164,23 +164,23 @@ def simple_refresh_token(request):
         data = json.loads(request.body.decode('utf-8'))
         refresh_token = data.get('refresh')
         store_id = data.get('store_id')
-        
+
         if not refresh_token:
             return JsonResponse({'error': 'refresh token обязателен'}, status=400)
-        
+
         from rest_framework_simplejwt.tokens import RefreshToken
         refresh = RefreshToken(refresh_token)
         user_id = refresh.payload.get('user_id')
-        
+
         user = User.objects.get(id=user_id)
-        
+
         if store_id:
             has_access = StoreEmployee.objects.filter(
                 user=user,
                 store_id=store_id,
                 is_active=True
             ).exists()
-            
+
             if not has_access:
                 return JsonResponse(
                     {'error': 'У вас нет доступа к указанному магазину'},
@@ -195,14 +195,14 @@ def simple_refresh_token(request):
                 ).first()
                 if membership:
                     store_id = str(membership.store.id)
-        
+
         tokens = get_tokens_for_user_and_store(user, store_id)
-        
+
         return JsonResponse({
             'access': tokens['access'],
             'refresh': tokens['refresh']
         })
-        
+
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=400)
 
@@ -214,7 +214,7 @@ class StoreRegisterView(APIView):
     # ✅ УБИРАЕМ АУТЕНТИФИКАЦИЮ ПОЛНОСТЬЮ
     permission_classes = []  # Пустой список вместо [permissions.AllowAny]
     authentication_classes = []  # Отключаем все виды аутентификации
-    
+
     @swagger_auto_schema(
         operation_description="Регистрация администратора и создание магазина (без аутентификации)",
         request_body=openapi.Schema(
@@ -250,17 +250,17 @@ class StoreRegisterView(APIView):
     def post(self, request):
         logger.info("Store registration started")
         logger.debug(f"Request data: {request.data}")
-        
+
         # Базовая валидация входных данных
         required_fields = ['username', 'password', 'email', 'store_name', 'store_address']
         missing_fields = [field for field in required_fields if not request.data.get(field)]
-        
+
         if missing_fields:
             return Response(
                 {'error': f'Отсутствуют обязательные поля: {", ".join(missing_fields)}'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         with transaction.atomic():
             try:
                 # Создаем пользователя
@@ -270,20 +270,20 @@ class StoreRegisterView(APIView):
                     'first_name': request.data.get('first_name', ''),
                     'last_name': request.data.get('last_name', ''),
                 }
-                
+
                 # Проверяем существование пользователя
                 if User.objects.filter(username=user_data['username']).exists():
                     return Response(
                         {'error': 'Пользователь с таким именем уже существует'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
-                
+
                 if User.objects.filter(email=user_data['email']).exists():
                     return Response(
                         {'error': 'Пользователь с таким email уже существует'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
-                
+
                 # Создаем пользователя
                 user = User.objects.create_user(
                     username=user_data['username'],
@@ -292,13 +292,13 @@ class StoreRegisterView(APIView):
                     last_name=user_data['last_name'],
                     password=request.data.get('password')
                 )
-                
+
                 logger.info(f"User created: {user.username}")
-                
+
                 # Добавляем в группу admin
                 admin_group, created = Group.objects.get_or_create(name='admin')
                 user.groups.add(admin_group)
-                
+
                 # Создаем Employee если модель существует
                 try:
                     from users.models import Employee
@@ -312,7 +312,7 @@ class StoreRegisterView(APIView):
                     logger.warning("Employee model not found, skipping")
                 except Exception as e:
                     logger.error(f"Error creating Employee: {e}")
-                
+
                 # Создаем магазин
                 store_data = {
                     'name': request.data.get('store_name'),
@@ -321,19 +321,19 @@ class StoreRegisterView(APIView):
                     'email': request.data.get('store_email', ''),
                     'description': request.data.get('store_description', ''),
                 }
-                
+
                 # Проверяем уникальность имени магазина
                 if Store.objects.filter(name__iexact=store_data['name']).exists():
                     return Response(
                         {'error': 'Магазин с таким названием уже существует'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
-                
+
                 store_serializer = StoreCreateSerializer(data=store_data)
                 if store_serializer.is_valid():
                     store = store_serializer.save(owner=user)
                     logger.info(f"Store created: {store.name}")
-                    
+
                     # Создаем связь StoreEmployee
                     store_employee = StoreEmployee.objects.create(
                         store=store,
@@ -341,10 +341,10 @@ class StoreRegisterView(APIView):
                         role='owner'
                     )
                     logger.info(f"StoreEmployee created: {user.username} -> {store.name}")
-                    
+
                     # Генерируем токены с информацией о магазине
                     tokens = get_tokens_for_user_and_store(user, str(store.id))
-                    
+
                     response_data = {
                         'success': True,
                         'user': {
@@ -370,7 +370,7 @@ class StoreRegisterView(APIView):
                         'role': store_employee.role,
                         'message': 'Регистрация успешно завершена'
                     }
-                    
+
                     logger.info(f"Registration completed successfully for {user.username}")
                     return Response(response_data, status=status.HTTP_201_CREATED)
                 else:
@@ -379,7 +379,7 @@ class StoreRegisterView(APIView):
                         {'error': 'Ошибка данных магазина', 'details': store_serializer.errors},
                         status=status.HTTP_400_BAD_REQUEST
                     )
-                    
+
             except Exception as e:
                 logger.error(f"Registration error: {str(e)}", exc_info=True)
                 return Response(
@@ -395,27 +395,27 @@ class StoreViewSet(viewsets.ModelViewSet):
     """
     serializer_class = StoreSerializer
     permission_classes = [permissions.IsAuthenticated]
-    
+
     def get_queryset(self):
         """Показываем только магазины, к которым у пользователя есть доступ"""
         user = self.request.user
-        
+
         # Если суперпользователь - показываем все
         if user.is_superuser:
             return Store.objects.all()
-        
+
         # Иначе только магазины, где пользователь является сотрудником
         store_ids = StoreEmployee.objects.filter(
             user=user,
             is_active=True
         ).values_list('store_id', flat=True)
-        
+
         return Store.objects.filter(id__in=store_ids)
-    
+
     def perform_create(self, serializer):
         """При создании магазина автоматически делаем создателя владельцем"""
         store = serializer.save(owner=self.request.user)
-        
+
         # Создаем связь StoreEmployee
         StoreEmployee.objects.create(
             store=store,
@@ -429,39 +429,61 @@ class CreateUserForStoreView(APIView):
     Создание пользователя с автоматической привязкой к текущему магазину
     """
     permission_classes = [permissions.IsAuthenticated]
-    
+
     def post(self, request):
         logger.info(f"CreateUser request from user: {request.user.username}")
-        
+
         # Получаем текущий магазин
         current_store = None
         store_role = None
-        
-        if hasattr(request.user, 'current_store') and request.user.current_store:
+
+        # Способ 1: Из JWT токена
+        auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+        if auth_header.startswith('Bearer '):
+            try:
+                from rest_framework_simplejwt.tokens import AccessToken
+                token = auth_header.split(' ')[1]
+                decoded_token = AccessToken(token)
+                store_id = decoded_token.get('store_id')
+
+                if store_id:
+                    from stores.models import Store
+                    current_store = Store.objects.get(id=store_id, is_active=True)
+                    store_role = decoded_token.get('store_role')
+                    logger.info(f"✅ Store from JWT: {current_store.name}")
+            except Exception as e:
+                logger.error(f"Failed to get store from JWT: {e}")
+
+        # Способ 2: Из атрибутов пользователя (middleware)
+        if not current_store and hasattr(request.user, 'current_store') and request.user.current_store:
             current_store = request.user.current_store
             store_role = getattr(request.user, 'store_role', 'unknown')
-        else:
+            logger.info(f"✅ Store from middleware: {current_store.name}")
+
+        # Способ 3: Из StoreEmployee
+        if not current_store:
             store_membership = StoreEmployee.objects.filter(
                 user=request.user,
                 is_active=True
             ).select_related('store').first()
-            
+
             if store_membership:
                 current_store = store_membership.store
                 store_role = store_membership.role
+                logger.info(f"✅ Store from StoreEmployee: {current_store.name}")
             else:
                 return Response(
                     {'error': 'Пользователь не привязан к магазину'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-        
+
         # Проверяем права
         if store_role not in ['owner', 'admin']:
             return Response(
                 {'error': f'У вас нет прав для создания пользователей. Ваша роль: {store_role}'},
                 status=status.HTTP_403_FORBIDDEN
             )
-        
+
         with transaction.atomic():
             try:
                 # Извлекаем данные
@@ -473,20 +495,20 @@ class CreateUserForStoreView(APIView):
                 phone = request.data.get('phone', '')
                 sex = request.data.get('sex', '')
                 role = request.data.get('store_role', 'cashier')
-                
+
                 # Валидация
                 if not username or not email or not password:
                     return Response(
                         {'error': 'username, email и password обязательны'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
-                
+
                 if User.objects.filter(username=username).exists():
                     return Response(
                         {'error': 'Пользователь с таким именем уже существует'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
-                
+
                 # Создаем пользователя
                 user = User.objects.create_user(
                     username=username,
@@ -496,53 +518,57 @@ class CreateUserForStoreView(APIView):
                     last_name=last_name
                 )
                 logger.info(f"✅ User created: {user.username}")
-                
-                # Привязываем к магазину
+
+                # Привязываем к магазину через StoreEmployee
                 store_employee = StoreEmployee.objects.create(
                     store=current_store,
                     user=user,
                     role=role
                 )
                 logger.info(f"✅ StoreEmployee created: {user.username} -> {current_store.name} ({role})")
-                
-                # Создаем Employee с СОХРАНЕНИЕМ ПАРОЛЯ
+
+                # ✅ ИСПРАВЛЕНИЕ: Создаем Employee С ПРИВЯЗКОЙ К МАГАЗИНУ
                 try:
                     from users.models import Employee
-                    Employee.objects.create(
+                    employee = Employee.objects.create(
                         user=user,
                         role=role,
                         phone=phone,
                         sex=sex,
-                        plain_password=password  # ← СОХРАНЯЕМ ПАРОЛЬ
+                        plain_password=password,
+                        store=current_store  # ← ВАЖНО: привязываем к магазину
                     )
-                    logger.info(f"✅ Employee record created with password")
+
+                    # Добавляем магазин в доступные
+                    employee.accessible_stores.add(current_store)
+                    employee.save()
+
+                    logger.info(f"✅ Employee record created with store: {current_store.name}")
                 except ImportError:
                     logger.warning("Employee model not found")
                 except Exception as e:
                     logger.error(f"Error creating Employee: {e}")
-                
+
                 # Добавляем в группу
                 group, _ = Group.objects.get_or_create(name=role)
                 user.groups.add(group)
-                
+
+                # Получаем созданного пользователя с полной информацией
+                from users.serializers import UserSerializer
+                user_serializer = UserSerializer(user, context={'request': request})
+
                 return Response({
                     'success': True,
-                    'user': {
-                        'id': user.id,
-                        'username': user.username,
-                        'email': user.email,
-                        'first_name': user.first_name,
-                        'last_name': user.last_name,
-                        'password': password  # Возвращаем пароль в ответе
-                    },
+                    'user': user_serializer.data,
                     'store': {
                         'id': str(current_store.id),
                         'name': current_store.name
                     },
                     'role': role,
-                    'message': f'Пользователь {user.username} создан с паролем: {password}'
+                    'password': password,  # Возвращаем пароль для администратора
+                    'message': f'Пользователь {user.username} успешно создан'
                 }, status=status.HTTP_201_CREATED)
-                
+
             except Exception as e:
                 logger.error(f"❌ Error creating user: {str(e)}", exc_info=True)
                 return Response(
@@ -555,7 +581,7 @@ class SwitchStoreView(APIView):
     Переключение на другой магазин с генерацией нового JWT токена
     """
     permission_classes = [permissions.IsAuthenticated]
-    
+
     @swagger_auto_schema(
         operation_description="Переключиться на другой магазин и получить новый токен",
         request_body=openapi.Schema(
@@ -577,13 +603,13 @@ class SwitchStoreView(APIView):
     )
     def post(self, request):
         store_id = request.data.get('store_id')
-        
+
         if not store_id:
             return Response(
                 {'error': 'store_id обязателен'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         # Проверяем, что пользователь имеет доступ к этому магазину
         try:
             store_membership = StoreEmployee.objects.get(
@@ -596,13 +622,13 @@ class SwitchStoreView(APIView):
                 {'error': 'У вас нет доступа к этому магазину'},
                 status=status.HTTP_403_FORBIDDEN
             )
-        
+
         # Генерируем новые токены с новым магазином
         tokens = get_tokens_for_user_and_store(request.user, store_id)
-        
+
         # Также сохраняем в сессию для веб-интерфейса
         request.session['current_store_id'] = str(store_id)
-        
+
         return Response({
             'access': tokens['access'],
             'refresh': tokens['refresh'],
@@ -622,7 +648,7 @@ class RefreshTokenWithStoreView(APIView):
     """
     permission_classes = []  # Разрешаем всем для обновления токена
     authentication_classes = []
-    
+
     @swagger_auto_schema(
         operation_description="Обновить access token с сохранением магазина",
         request_body=openapi.Schema(
@@ -631,7 +657,7 @@ class RefreshTokenWithStoreView(APIView):
             properties={
                 'refresh': openapi.Schema(type=openapi.TYPE_STRING),
                 'store_id': openapi.Schema(
-                    type=openapi.TYPE_STRING, 
+                    type=openapi.TYPE_STRING,
                     format='uuid',
                     description='ID магазина (опционально, для смены магазина)'
                 )
@@ -641,20 +667,20 @@ class RefreshTokenWithStoreView(APIView):
     def post(self, request):
         refresh_token = request.data.get('refresh')
         store_id = request.data.get('store_id')
-        
+
         if not refresh_token:
             return Response(
                 {'error': 'refresh token обязателен'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         try:
             from rest_framework_simplejwt.tokens import RefreshToken
             refresh = RefreshToken(refresh_token)
             user_id = refresh.payload.get('user_id')
-            
+
             user = User.objects.get(id=user_id)
-            
+
             # Если указан новый магазин, проверяем доступ
             if store_id:
                 has_access = StoreEmployee.objects.filter(
@@ -662,7 +688,7 @@ class RefreshTokenWithStoreView(APIView):
                     store_id=store_id,
                     is_active=True
                 ).exists()
-                
+
                 if not has_access:
                     return Response(
                         {'error': 'У вас нет доступа к указанному магазину'},
@@ -678,28 +704,28 @@ class RefreshTokenWithStoreView(APIView):
                     ).first()
                     if membership:
                         store_id = str(membership.store.id)
-            
+
             # Генерируем новые токены
             tokens = get_tokens_for_user_and_store(user, store_id)
-            
+
             return Response({
                 'access': tokens['access'],
                 'refresh': tokens['refresh']
             })
-            
+
         except Exception as e:
             return Response(
                 {'error': str(e)},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
 
 class DebugTokenView(APIView):
     """
     Отладочный view для проверки JWT токена и магазина
     """
     permission_classes = [permissions.IsAuthenticated]
-    
+
     def get(self, request):
         debug_info = {
             'user_info': {
@@ -717,7 +743,7 @@ class DebugTokenView(APIView):
             'store_memberships': [],
             'jwt_info': {}
         }
-        
+
         # Информация о текущем магазине
         if hasattr(request.user, 'current_store') and request.user.current_store:
             debug_info['current_store'] = {
@@ -725,12 +751,12 @@ class DebugTokenView(APIView):
                 'name': request.user.current_store.name,
                 'role': getattr(request.user, 'store_role', 'unknown')
             }
-        
+
         # Все магазины пользователя
         memberships = StoreEmployee.objects.filter(
             user=request.user
         ).select_related('store')
-        
+
         for membership in memberships:
             debug_info['store_memberships'].append({
                 'store_id': str(membership.store.id),
@@ -738,7 +764,7 @@ class DebugTokenView(APIView):
                 'role': membership.role,
                 'is_active': membership.is_active
             })
-        
+
         # Информация из JWT токена
         auth_header = request.META.get('HTTP_AUTHORIZATION', '')
         if auth_header.startswith('Bearer '):
@@ -756,5 +782,5 @@ class DebugTokenView(APIView):
                 }
             except Exception as e:
                 debug_info['jwt_info']['error'] = str(e)
-        
+
         return Response(debug_info)

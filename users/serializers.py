@@ -9,35 +9,72 @@ from stores.models import StoreEmployee
 from stores.tokens import get_tokens_for_user_and_store
 
 class EmployeeSerializer(serializers.ModelSerializer):
-    plain_password = serializers.CharField(read_only=True)  # Добавляем поле пароля
-    
+    # ✅ ДОБАВЛЯЕМ ИНФОРМАЦИЮ О МАГАЗИНЕ
+    store_info = serializers.SerializerMethodField()
+    accessible_stores_info = serializers.SerializerMethodField()
+
     class Meta:
         model = Employee
-        fields = ['role', 'phone', 'photo', 'sex', 'plain_password', 'created_at']
+        fields = [
+            'role', 'phone', 'photo', 'sex', 'plain_password', 'created_at',
+            'store', 'store_info', 'accessible_stores_info'
+        ]
         extra_kwargs = {
-            'photo': {'required': False, 'allow_null': True}
+            'plain_password': {'write_only': True}  # Скрываем пароль в ответе
         }
 
+    def get_store_info(self, obj):
+        """Информация об основном магазине"""
+        if obj.store:
+            return {
+                'id': obj.store.id,
+                'name': obj.store.name
+            }
+        return None
+
+    def get_accessible_stores_info(self, obj):
+        """Список доступных магазинов"""
+        if obj.role == 'admin':
+            # Для админов показываем все магазины
+            from stores.models import Store
+            stores = Store.objects.all()
+            return [{'id': s.id, 'name': s.name} for s in stores]
+        else:
+            # Для остальных - основной магазин + доступные
+            stores = []
+            if obj.store:
+                stores.append({'id': obj.store.id, 'name': obj.store.name})
+
+            for store in obj.accessible_stores.all():
+                if store.id != obj.store.id:  # Избегаем дублирования
+                    stores.append({'id': store.id, 'name': store.name})
+
+            return stores
+
 class UserSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True, required=True)
-    employee = EmployeeSerializer(required=False)  # ✅ изменено
-    groups = serializers.SlugRelatedField(
-        many=True,
-        slug_field='name',
-        queryset=Group.objects.all(),
-        required=True
-    )
-    full_name = serializers.SerializerMethodField()
+    full_name = serializers.CharField(read_only=True)
+    groups = serializers.StringRelatedField(many=True, read_only=True)
+    employee = EmployeeSerializer(required=False)
+
+    # ✅ ДОБАВЛЯЕМ ТЕКУЩИЙ МАГАЗИН
+    current_store = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = [
-            'id', 'username', 'email', 'groups', 'first_name', 'last_name',
-            'full_name', 'employee', 'password',
+            'id', 'username', 'email', 'first_name', 'last_name',
+            'full_name', 'groups', 'employee', 'current_store'
         ]
-        extra_kwargs = {
-            'password': {'write_only': True}
-        }
+
+    def get_current_store(self, obj):
+        """Получить текущий магазин пользователя"""
+        if hasattr(obj, 'employee') and obj.employee and obj.employee.store:
+            return {
+                'id': obj.employee.store.id,
+                'name': obj.employee.store.name
+            }
+        return None
+
     def get_full_name(self, obj):
         return f"{obj.first_name} {obj.last_name}".strip() or obj.username
 
@@ -75,7 +112,7 @@ class UserSerializer(serializers.ModelSerializer):
 
         instance.save()
 
-        # обновляем группы, если переданы
+        # обновляем группы
         if groups is not None:
             instance.groups.set([Group.objects.get(name=name) for name in groups])
 
@@ -182,22 +219,22 @@ class StoreEmployeeUserSerializer(serializers.ModelSerializer):
     full_name = serializers.SerializerMethodField()
     employee_info = serializers.SerializerMethodField()
     password = serializers.SerializerMethodField()  # ДОБАВЛЯЕМ ПОЛЕ ПАРОЛЯ
-    
+
     class Meta:
         model = User
         fields = [
             'id', 'username', 'email', 'first_name', 'last_name', 'full_name',
             'is_active', 'date_joined', 'last_login',
-            'store_role', 'is_active_in_store', 'joined_store_at', 
+            'store_role', 'is_active_in_store', 'joined_store_at',
             'store_permissions', 'employee_info', 'password'  # ДОБАВЛЯЕМ В FIELDS
         ]
-    
+
     def get_password(self, obj):
         """Получаем пароль из модели Employee (только для админов)"""
         request = self.context.get('request')
         if not request:
             return None
-        
+
         # Проверяем что запрашивающий - админ или owner
         from stores.models import StoreEmployee
         store = self.context.get('store')
@@ -206,69 +243,69 @@ class StoreEmployeeUserSerializer(serializers.ModelSerializer):
                 user=request.user,
                 store=store
             ).first()
-            
+
             if requester_membership and requester_membership.role in ['owner', 'admin']:
                 try:
                     employee = obj.employee
                     return employee.plain_password
                 except Employee.DoesNotExist:
                     return None
-        
+
         return None  # Не показываем пароль не-админам
-    
+
     def get_full_name(self, obj):
         return f"{obj.first_name} {obj.last_name}".strip() or obj.username
-    
+
     def get_store_role(self, obj):
         store = self.context.get('store')
         if not store:
             return None
-        
+
         from stores.models import StoreEmployee
         membership = StoreEmployee.objects.filter(
             user=obj,
             store=store
         ).first()
-        
+
         return membership.role if membership else None
-    
+
     def get_is_active_in_store(self, obj):
         store = self.context.get('store')
         if not store:
             return False
-        
+
         from stores.models import StoreEmployee
         membership = StoreEmployee.objects.filter(
             user=obj,
             store=store
         ).first()
-        
+
         return membership.is_active if membership else False
-    
+
     def get_joined_store_at(self, obj):
         store = self.context.get('store')
         if not store:
             return None
-        
+
         from stores.models import StoreEmployee
         membership = StoreEmployee.objects.filter(
             user=obj,
             store=store
         ).first()
-        
+
         return membership.joined_at if membership else None
-    
+
     def get_store_permissions(self, obj):
         store = self.context.get('store')
         if not store:
             return {}
-        
+
         from stores.models import StoreEmployee
         membership = StoreEmployee.objects.filter(
             user=obj,
             store=store
         ).first()
-        
+
         if membership:
             return {
                 'can_manage_products': membership.can_manage_products,
@@ -277,7 +314,7 @@ class StoreEmployeeUserSerializer(serializers.ModelSerializer):
                 'can_manage_employees': membership.can_manage_employees,
             }
         return {}
-    
+
     def get_employee_info(self, obj):
         try:
             employee = obj.employee

@@ -127,10 +127,21 @@ class TransactionHistory(StoreOwnedModel):
     created_at = models.DateTimeField(auto_now_add=True)
 
     objects = StoreOwnedManager()
+
     class Meta:
         verbose_name = "История продажи"
         verbose_name_plural = "История продаж"
         ordering = ['-created_at']
+
+    def save(self, *args, **kwargs):
+        # если магазин не указан → берём из транзакции
+        if not self.store_id and self.transaction_id:
+            self.store = self.transaction.store
+        else:
+            # защита: если кто-то попробует подменить
+            if self.store_id != self.transaction.store_id:
+                raise ValueError("Магазин истории должен совпадать с магазином транзакции")
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.action} для продажи #{self.transaction.id} от {self.created_at}"

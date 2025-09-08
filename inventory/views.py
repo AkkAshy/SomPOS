@@ -72,13 +72,30 @@ class SizeInfoPagination(LimitOffsetPagination):
             'results': data
         })
 
+class CustomPagination(LimitOffsetPagination):
+    """
+    Кастомная пагинация с настраиваемыми параметрами
+    """
+    default_limit = 20
+    limit_query_param = 'limit'
+    offset_query_param = 'offset'
+    max_limit = 100
 
+    def get_paginated_response(self, data):
+        return Response({
+            'count': self.count,
+            'limit': self.limit,
+            'offset': self.offset,
+            'next': self.get_next_link(),
+            'previous': self.get_previous_link(),
+            'results': data
+        })
 
 class ProductCategoryViewSet(StoreViewSetMixin, ModelViewSet):
     """
     ViewSet для управления категориями товаров
     """
-    pagination_class = pagination.PageNumberPagination
+    pagination_class = CustomPagination
     queryset = ProductCategory.objects.all()
     serializer_class = ProductCategorySerializer
     filter_backends = [SearchFilter, OrderingFilter]
@@ -90,7 +107,7 @@ class ProductCategoryViewSet(StoreViewSetMixin, ModelViewSet):
     # def list(self, request, *args, **kwargs):
     #     return super().list(request, *args, **kwargs)
 
-  
+
 
     # def create(self, request, *args, **kwargs):
     #     return super().create(request, *args, **kwargs)
@@ -298,7 +315,7 @@ class ProductViewSet(StoreViewSetMixin, ModelViewSet):
 
         # Получаем текущий магазин
         current_store = self.get_current_store() if hasattr(self, 'get_current_store') else getattr(request.user, 'current_store', None)
-        
+
         if not current_store:
             return Response({
                 'error': 'Магазин не определен. Переавторизуйтесь.',
@@ -344,7 +361,7 @@ class ProductViewSet(StoreViewSetMixin, ModelViewSet):
                 }, status=status.HTTP_200_OK)
 
         # ✅ СОЗДАЕМ НОВЫЙ ТОВАР - ПРАВИЛЬНАЯ ПОСЛЕДОВАТЕЛЬНОСТЬ
-        
+
         # 1. Валидируем данные
         serializer = self.get_serializer(data=request.data)
         if not serializer.is_valid():
@@ -353,7 +370,7 @@ class ProductViewSet(StoreViewSetMixin, ModelViewSet):
         # 2. Создаем товар через perform_create (установит store автоматически)
         self.perform_create(serializer)
         product = serializer.instance
-        
+
         # 3. Теперь у product есть store, можем создать Stock вручную если нужно
         if not hasattr(product, 'stock'):
             try:
@@ -415,7 +432,7 @@ class ProductViewSet(StoreViewSetMixin, ModelViewSet):
             'message': _('Товар успешно создан'),
             'action': 'product_created'
         }, status=status.HTTP_201_CREATED)
-    
+
     @transaction.atomic
     def update(self, request, *args, **kwargs):
         """
@@ -482,16 +499,40 @@ class ProductViewSet(StoreViewSetMixin, ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Ищем только в текущем магазине
-        if hasattr(request.user, 'current_store'):
-            product = Product.objects.filter(
-                store=request.user.current_store,  # ← ДОБАВИТЬ фильтр
-                barcode=barcode
-            ).select_related('category', 'stock').first()
-        else:
-            product = None
+        # ✅ ИСПРАВЛЕНИЕ: Используем get_current_store() как в других методах
+        current_store = self.get_current_store()
+
+        if not current_store:
+            return Response({
+                'error': 'Магазин не определен. Переавторизуйтесь или выберите магазин.',
+                'debug_info': {
+                    'user': request.user.username,
+                    'has_current_store': hasattr(request.user, 'current_store'),
+                    'current_store_value': getattr(request.user, 'current_store', None)
+                }
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # ✅ ИСПРАВЛЕНИЕ: Добавляем логирование для отладки
+        logger.info(f"🔍 Scanning barcode: '{barcode}' in store: {current_store.name} (ID: {current_store.id})")
+
+        # Ищем товар в текущем магазине
+        product = Product.objects.filter(
+            store=current_store,
+            barcode=barcode
+        ).select_related('category', 'stock').first()
+
+        # ✅ ИСПРАВЛЕНИЕ: Дополнительная отладочная информация
+        if not product:
+            # Проверяем, есть ли товар с таким штрих-кодом в других магазинах
+            other_stores_count = Product.objects.filter(barcode=barcode).exclude(store=current_store).count()
+            all_products_count = Product.objects.filter(barcode=barcode).count()
+
+            logger.warning(f"❌ Product not found. Barcode: '{barcode}', Current store: {current_store.id}, "
+                          f"Products with this barcode in other stores: {other_stores_count}, "
+                          f"Total products with this barcode: {all_products_count}")
 
         if product:
+            logger.info(f"✅ Product found: {product.name} (ID: {product.id})")
             serializer = self.get_serializer(product)
             return Response({
                 'found': True,
@@ -499,19 +540,19 @@ class ProductViewSet(StoreViewSetMixin, ModelViewSet):
                 'message': _('Товар найден')
             })
         else:
-            # Товар не найден, возвращаем категории ТЕКУЩЕГО МАГАЗИНА
-            if hasattr(request.user, 'current_store'):
-                categories = ProductCategory.objects.filter(
-                    store=request.user.current_store  # ← ДОБАВИТЬ фильтр
-                )
-            else:
-                categories = ProductCategory.objects.none()
+            # Товар не найден, возвращаем категории текущего магазина
+            categories = ProductCategory.objects.filter(store=current_store)
 
             return Response({
                 'found': False,
                 'barcode': barcode,
                 'categories': ProductCategorySerializer(categories, many=True).data,
-                'message': _('Товар не найден. Создайте новый товар.')
+                'message': _('Товар не найден. Создайте новый товар.'),
+                'debug_info': {
+                    'current_store_id': current_store.id,
+                    'current_store_name': current_store.name,
+                    'barcode_searched': barcode
+                }
             })
 
     @action(detail=True, methods=['post'])
@@ -557,6 +598,306 @@ class ProductViewSet(StoreViewSetMixin, ModelViewSet):
             'count': products.count(),
             'min_quantity': min_quantity
         })
+
+    @action(detail=False, methods=['get'])
+    def product_sizes_info(self, request):
+        """
+        Получить информацию о размерах и количестве товаров по имени
+
+        Query Parameters:
+            - name: название товара (или его часть)
+
+        Returns:
+            - Если name передан: информация о товарах с этим именем, их размерах и количестве
+            - Если name не передан: пустой JSON {}
+
+        Example:
+            GET /api/inventory/products/product_sizes_info/?name=Футболка
+
+        Response:
+            {
+                "product_name": "Футболка",
+                "total_products": 5,
+                "total_stock": 150,
+                "sizes": [
+                    {
+                        "size": "S",
+                        "size_id": 1,
+                        "count": 1,
+                        "stock_quantity": 20,
+                        "products": [
+                            {
+                                "id": 1,
+                                "name": "Футболка - S",
+                                "barcode": "123456789",
+                                "stock": 20,
+                                "price": 150000.00
+                            }
+                        ]
+                    },
+                    {
+                        "size": "M",
+                        "size_id": 2,
+                        "count": 2,
+                        "stock_quantity": 50,
+                        "products": [...]
+                    }
+                ],
+                "products_without_size": {
+                    "count": 1,
+                    "stock_quantity": 30,
+                    "products": [...]
+                }
+            }
+        """
+        # Получаем параметр name из запроса
+        product_name = request.query_params.get('name', '').strip()
+
+        # Если name не передан или пустой - возвращаем пустой JSON
+        if not product_name:
+            return Response({})
+
+        # Получаем текущий магазин
+        current_store = self.get_current_store()
+        if not current_store:
+            return Response({
+                'error': 'Магазин не определен'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Ищем товары по имени (частичное совпадение, регистронезависимо)
+        products = Product.objects.filter(
+            store=current_store,
+            name__icontains=product_name
+        ).select_related('size', 'stock', 'category').order_by('name', 'size__size')
+
+        # Если товары не найдены
+        if not products.exists():
+            return Response({
+                'product_name': product_name,
+                'total_products': 0,
+                'total_stock': 0,
+                'sizes': [],
+                'message': f'Товары с названием "{product_name}" не найдены'
+            })
+
+        # Группируем товары по размерам
+        sizes_data = {}
+        products_without_size = []
+        total_stock = 0
+
+        for product in products:
+            stock_quantity = product.stock.quantity if hasattr(product, 'stock') else 0
+            total_stock += stock_quantity
+
+            product_info = {
+                'id': product.id,
+                'name': product.name,
+                'barcode': product.barcode,
+                'stock': stock_quantity,
+                'price': float(product.sale_price),
+                'category': product.category.name if product.category else None
+            }
+
+            if product.size:
+                size_key = product.size.size
+                if size_key not in sizes_data:
+                    sizes_data[size_key] = {
+                        'size': product.size.size,
+                        'size_id': product.size.id,
+                        'chest': product.size.chest,
+                        'waist': product.size.waist,
+                        'length': product.size.length,
+                        'count': 0,
+                        'stock_quantity': 0,
+                        'products': []
+                    }
+
+                sizes_data[size_key]['count'] += 1
+                sizes_data[size_key]['stock_quantity'] += stock_quantity
+                sizes_data[size_key]['products'].append(product_info)
+            else:
+                products_without_size.append(product_info)
+
+        # Преобразуем словарь размеров в список и сортируем
+        size_order = ['XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL']
+        sizes_list = list(sizes_data.values())
+
+        # Сортируем размеры в правильном порядке
+        def size_sort_key(item):
+            try:
+                return size_order.index(item['size'])
+            except ValueError:
+                return 999  # Неизвестные размеры в конец
+
+        sizes_list.sort(key=size_sort_key)
+
+        # Формируем результат
+        response_data = {
+            'product_name': product_name,
+            'total_products': products.count(),
+            'total_stock': total_stock,
+            'sizes': sizes_list
+        }
+
+        # Добавляем информацию о товарах без размера, если они есть
+        if products_without_size:
+            response_data['products_without_size'] = {
+                'count': len(products_without_size),
+                'stock_quantity': sum(p['stock'] for p in products_without_size),
+                'products': products_without_size
+            }
+
+        return Response(response_data)
+
+
+    @action(detail=False, methods=['get'])
+    def sizes_summary(self, request):
+        """
+        Получить сводку по всем размерам в магазине
+        Более простой вариант - только общая статистика
+
+        Query Parameters:
+            - name: (опционально) фильтр по имени товара
+
+        Example:
+            GET /api/inventory/products/sizes_summary/
+            GET /api/inventory/products/sizes_summary/?name=Футболка
+        """
+        product_name = request.query_params.get('name', '').strip()
+
+        # Если имя не указано - возвращаем пустой JSON
+        if not product_name:
+            return Response({})
+
+        # Получаем текущий магазин
+        current_store = self.get_current_store()
+        if not current_store:
+            return Response({
+                'error': 'Магазин не определен'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Базовый queryset
+        queryset = Product.objects.filter(store=current_store)
+
+        # Фильтруем по имени если указано
+        if product_name:
+            queryset = queryset.filter(name__icontains=product_name)
+
+        # Агрегируем данные по размерам
+        from django.db.models import Count, Sum, Avg
+
+        sizes_stats = queryset.filter(
+            size__isnull=False
+        ).values(
+            'size__size'
+        ).annotate(
+            product_count=Count('id'),
+            total_stock=Sum('stock__quantity'),
+            avg_price=Avg('sale_price'),
+            min_price=models.Min('sale_price'),
+            max_price=models.Max('sale_price')
+        ).order_by('size__size')
+
+        # Преобразуем в список и сортируем
+        size_order = ['XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL']
+        sizes_list = list(sizes_stats)
+
+        def size_sort_key(item):
+            try:
+                return size_order.index(item['size__size'])
+            except (ValueError, KeyError):
+                return 999
+
+        sizes_list.sort(key=size_sort_key)
+
+        # Общая статистика
+        total_stats = queryset.aggregate(
+            total_products=Count('id'),
+            total_with_size=Count('id', filter=models.Q(size__isnull=False)),
+            total_without_size=Count('id', filter=models.Q(size__isnull=True)),
+            total_stock=Sum('stock__quantity')
+        )
+
+        return Response({
+            'filter': {'name': product_name} if product_name else None,
+            'summary': total_stats,
+            'by_size': sizes_list
+        })
+
+
+    @action(detail=False, methods=['post'])
+    def check_sizes(self, request):
+        """
+        Проверить наличие размеров для списка товаров
+
+        Body:
+            {
+                "product_names": ["Футболка", "Джинсы", "Платье"]
+            }
+
+        Returns:
+            Информация о размерах для каждого товара
+        """
+        product_names = request.data.get('product_names', [])
+
+        if not product_names:
+            return Response({})
+
+        # Получаем текущий магазин
+        current_store = self.get_current_store()
+        if not current_store:
+            return Response({
+                'error': 'Магазин не определен'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        result = {}
+
+        for name in product_names:
+            if not name or not name.strip():
+                continue
+
+            name = name.strip()
+
+            # Находим товары с этим именем
+            products = Product.objects.filter(
+                store=current_store,
+                name__icontains=name
+            ).select_related('size', 'stock')
+
+            if not products.exists():
+                result[name] = {
+                    'found': False,
+                    'total_products': 0,
+                    'sizes': []
+                }
+                continue
+
+            # Собираем уникальные размеры
+            sizes = set()
+            total_stock = 0
+
+            for product in products:
+                if product.size:
+                    sizes.add(product.size.size)
+                if hasattr(product, 'stock'):
+                    total_stock += product.stock.quantity
+
+            # Сортируем размеры
+            size_order = ['XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL']
+            sorted_sizes = sorted(
+                list(sizes),
+                key=lambda x: size_order.index(x) if x in size_order else 999
+            )
+
+            result[name] = {
+                'found': True,
+                'total_products': products.count(),
+                'total_stock': total_stock,
+                'available_sizes': sorted_sizes,
+                'has_products_without_size': products.filter(size__isnull=True).exists()
+            }
+
+        return Response(result)
 
 
 class ProductBatchViewSet(StoreViewSetMixin, ModelViewSet):

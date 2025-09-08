@@ -11,11 +11,28 @@ from stores.mixins import StoreOwnedModel, StoreOwnedManager
 
 logger = logging.getLogger('analytics')
 
+class SalesSummaryManager(StoreOwnedManager):
+    def update_from_transaction(self, transaction):
+        summary, created = self.get_or_create(
+            store=transaction.store,   # ✅ берём магазин из транзакции
+            date=transaction.created_at.date(),
+            payment_method=transaction.payment_method,
+            defaults={
+                "cashier": transaction.cashier,
+                "total_amount": transaction.total_amount,
+                "total_transactions": 1,
+                "total_items_sold": transaction.items_count,
+            }
+        )
+        if not created:
+            summary.total_amount += transaction.total_amount
+            summary.total_transactions += 1
+            summary.total_items_sold += transaction.items_count
+            summary.save()
+        return summary
+
+
 class SalesSummary(StoreOwnedModel):
-    """
-    Агрегированная статистика по продажам за день.
-    Храним данные по дням, чтобы снизить нагрузку на запросы.
-    """
     date = models.DateField(verbose_name=_("Дата"))
     cashier = models.ForeignKey(
         User,
@@ -25,27 +42,19 @@ class SalesSummary(StoreOwnedModel):
         verbose_name="Кассир",
         related_name="sales_summaries"
     )
-    total_amount = models.DecimalField(
-        max_digits=12, decimal_places=2, default=0.00,
-        verbose_name=_("Общая сумма продаж")
-    )
-    total_transactions = models.PositiveIntegerField(
-        default=0, verbose_name=_("Количество транзакций")
-    )
-    total_items_sold = models.PositiveIntegerField(
-        default=0, verbose_name=_("Количество проданных товаров")
-    )
+    total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    total_transactions = models.PositiveIntegerField(default=0)
+    total_items_sold = models.PositiveIntegerField(default=0)
     payment_method = models.CharField(
-        max_length=20, choices=Transaction.PAYMENT_METHODS,
-        verbose_name=_("Метод оплаты")
+        max_length=20, choices=Transaction.PAYMENT_METHODS
     )
 
-    objects = StoreOwnedManager()  # ← ДОБАВИТЬ
+    objects = StoreOwnedManager()
 
     class Meta:
         verbose_name = _("Сводка по продажам")
         verbose_name_plural = _("Сводки по продажам")
-        unique_together = ('store', 'date', 'payment_method')  # ← ИЗМЕНИТЬ
+        unique_together = ('store', 'date', 'payment_method')
         ordering = ['-date']
 
     def __str__(self):
