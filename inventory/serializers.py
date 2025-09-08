@@ -12,6 +12,7 @@ from .models import (Product, ProductCategory, Stock,
                      )
 from users.serializers import UserSerializer
 import logging
+from stores.mixins import StoreSerializerMixin
 
 logger = logging.getLogger('inventory')
 
@@ -27,12 +28,96 @@ class ProductCategorySerializer(serializers.ModelSerializer):
 
     def validate_name(self, value):
         value = value.strip()
-        if ProductCategory.objects.filter(name__iexact=value).exists():
+
+        # ✅ ИСПРАВЛЕНИЕ: Проверяем уникальность ТОЛЬКО в рамках текущего магазина
+        request = self.context.get('request')
+
+        if not request:
+            # Если нет контекста запроса, используем глобальную проверку как fallback
+            if ProductCategory.objects.filter(name__iexact=value).exists():
+                raise serializers.ValidationError(
+                    _("Категория с названием '%(name)s' уже существует") % {'name': value},
+                    code='duplicate_category'
+                )
+            return value
+
+        # Получаем текущий магазин из пользователя
+        current_store = None
+
+        # Способ 1: Из атрибута пользователя (установлено middleware)
+        if hasattr(request.user, 'current_store') and request.user.current_store:
+            current_store = request.user.current_store
+
+        # Способ 2: Из JWT токена
+        if not current_store:
+            auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+            if auth_header.startswith('Bearer '):
+                try:
+                    from rest_framework_simplejwt.tokens import AccessToken
+                    token = auth_header.split(' ')[1]
+                    decoded_token = AccessToken(token)
+                    store_id = decoded_token.get('store_id')
+
+                    if store_id:
+                        from stores.models import Store
+                        current_store = Store.objects.filter(id=store_id).first()
+                except Exception:
+                    pass
+
+        # Способ 3: Через StoreEmployee
+        if not current_store:
+            from stores.models import StoreEmployee
+            store_membership = StoreEmployee.objects.filter(
+                user=request.user,
+                is_active=True
+            ).select_related('store').first()
+
+            if store_membership:
+                current_store = store_membership.store
+
+        if not current_store:
             raise serializers.ValidationError(
-                _("Категория с названием '%(name)s' уже существует") % {'name': value},
-                code='duplicate_category'
+                _("Не удалось определить текущий магазин"),
+                code='no_store'
             )
+
+        # ✅ ГЛАВНОЕ ИСПРАВЛЕНИЕ: Проверяем уникальность только в ТЕКУЩЕМ магазине
+        existing_query = ProductCategory.objects.filter(
+            store=current_store,  # ← ФИЛЬТР ПО МАГАЗИНУ!
+            name__iexact=value
+        )
+
+        # Если это обновление существующей категории, исключаем её из проверки
+        if self.instance:
+            existing_query = existing_query.exclude(pk=self.instance.pk)
+
+        if existing_query.exists():
+            raise serializers.ValidationError(
+                _("Категория с названием '%(name)s' уже существует в вашем магазине") % {'name': value},
+                code='duplicate_category_in_store'
+            )
+
         return value
+
+    def create(self, validated_data):
+        """
+        При создании НЕ устанавливаем store здесь - это сделает StoreViewSetMixin.perform_create()
+        """
+        return ProductCategory(**validated_data)
+
+    def update(self, instance, validated_data):
+        """
+        При обновлении проверяем что категория принадлежит текущему магазину
+        """
+        request = self.context.get('request')
+        if request and hasattr(request.user, 'current_store') and request.user.current_store:
+            if instance.store != request.user.current_store:
+                raise serializers.ValidationError(
+                    _("Вы не можете редактировать категории другого магазина"),
+                    code='wrong_store'
+                )
+
+        return super().update(instance, validated_data)
 
 ############################################################# Атрибуты #############################################################
 class AttributeValueSerializer(serializers.ModelSerializer):
@@ -129,7 +214,7 @@ class ProductBatchSerializer(serializers.ModelSerializer):
 
 
 
-class ProductSerializer(serializers.ModelSerializer):
+class ProductSerializer(StoreSerializerMixin, serializers.ModelSerializer):
     category_name = serializers.CharField(source='category.name', read_only=True)
     size = SizeInfoSerializer(read_only=True)
     current_stock = serializers.IntegerField(
@@ -177,10 +262,7 @@ class ProductSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_at', 'current_stock', 'created_by']
         extra_kwargs = {
             'name': {'trim_whitespace': True},
-            'barcode': {
-                'required': False,
-                'allow_blank': True
-            }
+            'barcode': {'required': False, 'allow_blank': True},
         }
 
     def validate_sale_price(self, value):
@@ -215,10 +297,10 @@ class ProductSerializer(serializers.ModelSerializer):
                 store=request.user.current_store,  # ← Фильтр по магазину
                 barcode=value
             )
-            
+
             if self.instance:
                 existing_query = existing_query.exclude(pk=self.instance.pk)
-            
+
             if existing_query.exists():
                 raise serializers.ValidationError(
                     _("Товар с таким штрихкодом уже существует в этом магазине"),
@@ -232,13 +314,13 @@ class ProductSerializer(serializers.ModelSerializer):
         ✅ ИСПРАВЛЕННОЕ создание товара - НЕ ТРОГАЕМ СИГНАЛЫ
         """
         size = validated_data.pop('size', None)
-        
+
         # ✅ ВАЖНО: НЕ устанавливаем created_by здесь - это сделает StoreViewSetMixin
         # ✅ ВАЖНО: НЕ устанавливаем store здесь - это сделает StoreViewSetMixin
-        
+
         # Создаем товар БЕЗ store и created_by - их установит миксин в perform_create
         product = Product(**validated_data)
-        
+
         # НЕ СОХРАНЯЕМ ЕЩЕ! Пусть StoreViewSetMixin.perform_create сохранит с store
         return product
 
@@ -328,19 +410,19 @@ class ProductMultiSizeCreateSerializer(serializers.Serializer):
         # Извлекаем необходимые данные
         store = validated_data.get('store')  # Передается из view
         created_by = validated_data.get('created_by')  # Передается из view
-        
+
         if not store:
             raise serializers.ValidationError("Store is required")
         if not created_by:
             raise serializers.ValidationError("created_by is required")
 
         batch_info = validated_data.get('batch_info', [])
-        
+
         if not batch_info:
             raise serializers.ValidationError("batch_info с размерами обязателен")
 
         created_products = []
-        
+
         # Извлекаем уникальные размеры из batch_info
         size_ids = list(set(batch['size_id'] for batch in batch_info))
 
@@ -350,13 +432,13 @@ class ProductMultiSizeCreateSerializer(serializers.Serializer):
                     try:
                         # Получаем размер
                         size_instance = SizeInfo.objects.get(id=size_id)
-                        
+
                         # Создаем имя товара с размером
                         product_name = f"{validated_data['name']} - {size_instance.size}"
-                        
+
                         # Генерируем уникальный штрих-код
                         unique_barcode = self.generate_unique_barcode(store)
-                        
+
                         # ✅ Создаем товар СРАЗУ с store
                         product = Product.objects.create(
                             name=product_name,
@@ -368,7 +450,7 @@ class ProductMultiSizeCreateSerializer(serializers.Serializer):
                             size=size_instance,
                             store=store  # ← ВАЖНО: устанавливаем store сразу
                         )
-                        
+
                         logger.info(f"✅ Multi-size product created: {product.name} in store {store.name}")
 
                         # ✅ Создаем Stock вручную с правильным store
@@ -393,7 +475,7 @@ class ProductMultiSizeCreateSerializer(serializers.Serializer):
                                 expiration_date=batch_for_size.get('expiration_date')
                             )
                             logger.info(f"✅ Batch created for multi-size product: {product.name}")
-                            
+
                             # Обновляем количество в Stock
                             product.stock.update_quantity()
 
@@ -425,7 +507,7 @@ class ProductMultiSizeCreateSerializer(serializers.Serializer):
         import uuid
         import random
         import time
-        
+
         max_attempts = 100
         attempts = 0
 
@@ -434,15 +516,15 @@ class ProductMultiSizeCreateSerializer(serializers.Serializer):
             timestamp = str(int(time.time()))[-6:]
             random_part = str(random.randint(100000, 999999))
             barcode_code = timestamp + random_part
-            
+
             # Добавляем контрольную сумму
             checksum = self._calculate_ean13_checksum(barcode_code)
             full_barcode = barcode_code + checksum
-            
+
             # Проверяем уникальность В ПРЕДЕЛАХ МАГАЗИНА
             if not Product.objects.filter(store=store, barcode=full_barcode).exists():
                 return full_barcode
-                
+
             attempts += 1
 
         # Fallback - используем UUID

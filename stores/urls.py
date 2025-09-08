@@ -4,7 +4,8 @@ from rest_framework.routers import DefaultRouter
 from django.http import JsonResponse
 from .views import (
     StoreViewSet, CreateUserForStoreView, SwitchStoreView,
-    simple_store_register, simple_refresh_token, DebugTokenView
+    simple_store_register, simple_refresh_token, DebugTokenView,
+    DebugStoreAccessView
 )
 
 # Отладочный view
@@ -13,7 +14,7 @@ def debug_urls(request):
         'message': 'Stores URLs работают!',
         'available_endpoints': [
             '/api/stores/register/ (POST) - Регистрация магазина',
-            '/api/stores/refresh-token/ (POST) - Обновление токена', 
+            '/api/stores/refresh-token/ (POST) - Обновление токена',
             '/api/stores/debug/ (GET) - Этот endpoint',
             '/api/stores/ (GET) - Список магазинов (требует авторизацию)',
             '/api/stores/{id}/ (GET/PUT/PATCH/DELETE) - Управление магазином',
@@ -33,7 +34,8 @@ router.register(r'', StoreViewSet, basename='store')
 urlpatterns = [
     # ✅ ОТЛАДОЧНЫЙ endpoint
     path('debug/', debug_urls, name='debug-urls'),
-    
+    path('debug-access/', DebugStoreAccessView.as_view(), name='debug-store-access'),
+
     # ✅ ПРОСТЫЕ функции без DRF (без аутентификации)
     path('register/', simple_store_register, name='simple-store-register'),
     path('refresh-token/', simple_refresh_token, name='simple-refresh-token'),

@@ -1,6 +1,6 @@
 
 # inventory/views.py
-from rest_framework import status, generics
+from rest_framework import status, generics, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.viewsets import ModelViewSet
@@ -16,7 +16,7 @@ import logging
 from django.core.exceptions import ValidationError
 from rest_framework import pagination
 from .pagination import OptionalPagination
-from stores.mixins import StoreViewSetMixin, StorePermissionMixin
+from stores.mixins import StoreViewSetMixin, StoreSerializerMixin, StorePermissionMixin
 
 from customers.views import FlexiblePagination
 
@@ -96,21 +96,18 @@ class ProductCategoryViewSet(StoreViewSetMixin, ModelViewSet):
     ViewSet для управления категориями товаров
     """
     pagination_class = CustomPagination
-    queryset = ProductCategory.objects.all()
     serializer_class = ProductCategorySerializer
     filter_backends = [SearchFilter, OrderingFilter]
     search_fields = ['name']
     ordering_fields = ['name', 'created_at']
     ordering = ['name']
 
+    def get_queryset(self):
+        current_store = getattr(self.request.user, 'current_store', None)
+        if current_store:
+            return ProductCategory.objects.filter(store=current_store)
+        return ProductCategory.objects.none()
 
-    # def list(self, request, *args, **kwargs):
-    #     return super().list(request, *args, **kwargs)
-
-
-
-    # def create(self, request, *args, **kwargs):
-    #     return super().create(request, *args, **kwargs)
 
 
 class AttributeTypeViewSet(ModelViewSet):
@@ -157,25 +154,38 @@ class AttributeValueViewSet(ModelViewSet):
 
 
 
-class ProductViewSet(StoreViewSetMixin, ModelViewSet):
+class ProductViewSet(
+    StoreViewSetMixin,
+    StorePermissionMixin,   # ✅ этот можно оставить
+    viewsets.ModelViewSet
+):
     pagination_class = FlexiblePagination
     serializer_class = ProductSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_class = ProductFilter
     search_fields = ['name', 'barcode', 'category__name', 'created_by__username']
-    filterset_fields = ['category', 'created_by', 'created_by']
+    filterset_fields = ['category', 'created_by']
     ordering_fields = ['name', 'sale_price', 'created_at']
     ordering = ['-created_at']
 
-    def get_queryset(self):
-        return Product.objects.select_related(
-            'category', 'stock'
-        ).prefetch_related(
-            # 'attributes',
-            # 'productattribute_set__attribute_value__attribute_type',
-            'size',
-            'batches'
-        )
+    queryset = Product.objects.select_related("category", "stock").prefetch_related("size", "batches")
+    # def get_queryset(self):
+    #     # ✅ получаем текущий магазин
+    #     current_store = self.get_current_store()
+
+    #     # если магазин не найден — возвращаем пустой queryset
+    #     if not current_store:
+    #         return Product.objects.none()
+
+    #     return Product.objects.filter(
+    #         store=current_store  # 🔥 фильтрация по магазину
+    #     ).select_related(
+    #         'category', 'stock'
+    #     ).prefetch_related(
+    #         'size',
+    #         'batches'
+    #     )
+
 
     @swagger_auto_schema(
         operation_description="Создать товары для множественных размеров",

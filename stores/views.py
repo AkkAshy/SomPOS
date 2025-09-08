@@ -27,6 +27,125 @@ from django.views.decorators.http import require_http_methods
 from django.http import JsonResponse
 import json
 
+
+class DebugStoreAccessView(APIView):
+    """
+    Отладочный эндпоинт для проверки доступа к магазинам
+    GET /api/stores/debug-access/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+
+        debug_info = {
+            'user_info': {
+                'id': user.id,
+                'username': user.username,
+                'groups': list(user.groups.values_list('name', flat=True)),
+                'is_superuser': user.is_superuser,
+            },
+            'middleware_attributes': {
+                'has_current_store': hasattr(user, 'current_store'),
+                'current_store_id': str(user.current_store.id) if hasattr(user, 'current_store') and user.current_store else None,
+                'current_store_name': user.current_store.name if hasattr(user, 'current_store') and user.current_store else None,
+                'store_role': getattr(user, 'store_role', None),
+            },
+            'accessible_stores': [],
+            'data_counts': {},
+            'potential_issues': []
+        }
+
+        # Получаем доступные магазины через StoreEmployee
+        memberships = StoreEmployee.objects.filter(user=user, is_active=True).select_related('store')
+        for membership in memberships:
+            debug_info['accessible_stores'].append({
+                'id': str(membership.store.id),
+                'name': membership.store.name,
+                'role': membership.role,
+                'is_current': hasattr(user, 'current_store') and user.current_store and str(membership.store.id) == str(user.current_store.id)
+            })
+
+        # Проверяем доступ к данным
+        debug_info['data_counts'] = {
+            'all_products': Product.objects.count(),
+            'all_customers': Customer.objects.count(),
+            'all_transactions': Transaction.objects.count(),
+        }
+
+        # Если есть текущий магазин
+        current_store = getattr(user, 'current_store', None)
+        if current_store:
+            debug_info['data_counts'].update({
+                'current_store_products': Product.objects.filter(store=current_store).count(),
+                'current_store_customers': Customer.objects.filter(store=current_store).count(),
+                'current_store_transactions': Transaction.objects.filter(store=current_store).count(),
+            })
+
+            # Проверяем товары в других магазинах
+            other_stores = Store.objects.exclude(id=current_store.id)
+            other_stores_data = []
+            for other_store in other_stores:
+                other_products = Product.objects.filter(store=other_store)
+                other_customers = Customer.objects.filter(store=other_store)
+                other_transactions = Transaction.objects.filter(store=other_store)
+
+                other_stores_data.append({
+                    'store_id': str(other_store.id),
+                    'store_name': other_store.name,
+                    'products_count': other_products.count(),
+                    'customers_count': other_customers.count(),
+                    'transactions_count': other_transactions.count(),
+                    'sample_products': [
+                        {'id': p.id, 'name': p.name}
+                        for p in other_products[:3]
+                    ] if other_products.exists() else []
+                })
+
+                # Если видит товары других магазинов - это проблема
+                if other_products.count() > 0:
+                    debug_info['potential_issues'].append(
+                        f"МОЖЕТ ВИДЕТЬ {other_products.count()} товаров из магазина '{other_store.name}'"
+                    )
+
+            debug_info['other_stores_data'] = other_stores_data
+
+        # JWT токен информация
+        auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+        if auth_header.startswith('Bearer '):
+            try:
+                from rest_framework_simplejwt.tokens import AccessToken
+                token = auth_header.split(' ')[1]
+                decoded_token = AccessToken(token)
+
+                debug_info['jwt_token_info'] = {
+                    'store_id': decoded_token.get('store_id'),
+                    'store_name': decoded_token.get('store_name'),
+                    'store_role': decoded_token.get('store_role'),
+                    'user_id': decoded_token.get('user_id'),
+                }
+
+                # Проверяем соответствие JWT и middleware
+                jwt_store_id = decoded_token.get('store_id')
+                middleware_store_id = debug_info['middleware_attributes']['current_store_id']
+
+                if jwt_store_id != middleware_store_id:
+                    debug_info['potential_issues'].append(
+                        f"JWT store_id ({jwt_store_id}) != middleware store_id ({middleware_store_id})"
+                    )
+
+            except Exception as e:
+                debug_info['jwt_token_info'] = {'error': str(e)}
+
+        return Response(debug_info)
+
+# 2. Добавьте в stores/urls.py:
+# path('debug-access/', DebugStoreAccessView.as_view(), name='debug-store-access'),
+
+# 3. Протестируйте через API:
+# GET /api/stores/debug-access/
+# Authorization: Bearer YOUR_JWT_TOKEN
+
 @csrf_exempt
 @require_http_methods(["POST"])
 def simple_store_register(request):
@@ -67,7 +186,7 @@ def simple_store_register(request):
             }, status=400)
 
         with transaction.atomic():
-            # Создаем пользователя
+            # 1. Создаем пользователя
             user = User.objects.create_user(
                 username=data['username'],
                 email=data['email'],
@@ -77,25 +196,11 @@ def simple_store_register(request):
             )
             logger.info(f"User created: {user.username}")
 
-            # Добавляем в группу admin
+            # 2. Добавляем в группу admin
             admin_group, created = Group.objects.get_or_create(name='admin')
             user.groups.add(admin_group)
 
-            # Создаем Employee если модель существует
-            try:
-                from users.models import Employee
-                Employee.objects.create(
-                    user=user,
-                    role='admin',
-                    phone=data.get('phone', '')
-                )
-                logger.info(f"Employee record created for {user.username}")
-            except ImportError:
-                logger.warning("Employee model not found, skipping")
-            except Exception as e:
-                logger.error(f"Error creating Employee: {e}")
-
-            # Создаем магазин
+            # 3. Создаем магазин
             store = Store.objects.create(
                 name=data['store_name'],
                 address=data['store_address'],
@@ -106,7 +211,22 @@ def simple_store_register(request):
             )
             logger.info(f"Store created: {store.name}")
 
-            # Создаем связь StoreEmployee
+            # 4. Создаем Employee и привязываем к store
+            try:
+                from users.models import Employee
+                Employee.objects.create(
+                    user=user,
+                    role='owner',  # лучше "owner", раз это создатель магазина
+                    phone=data.get('phone', ''),
+                    store=store
+                )
+                logger.info(f"Employee record created for {user.username} in {store.name}")
+            except ImportError:
+                logger.warning("Employee model not found, skipping")
+            except Exception as e:
+                logger.error(f"Error creating Employee: {e}")
+
+            # 5. Создаем связь StoreEmployee
             store_employee = StoreEmployee.objects.create(
                 store=store,
                 user=user,
@@ -114,7 +234,7 @@ def simple_store_register(request):
             )
             logger.info(f"StoreEmployee created: {user.username} -> {store.name}")
 
-            # Генерируем токены
+            # 6. Генерируем токены
             tokens = get_tokens_for_user_and_store(user, str(store.id))
 
             response_data = {
@@ -145,6 +265,7 @@ def simple_store_register(request):
 
             logger.info(f"Registration completed successfully for {user.username}")
             return JsonResponse(response_data, status=201)
+
 
     except json.JSONDecodeError:
         return JsonResponse({'error': 'Неверный формат JSON'}, status=400)

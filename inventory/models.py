@@ -69,14 +69,17 @@ class SizeInfo(models.Model):
 
 
 class ProductCategory(StoreOwnedModel):
-    name = models.CharField(max_length=255, unique=True, verbose_name="Название")
+    name = models.CharField(max_length=255, verbose_name="Название")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Дата создания")
     objects = StoreOwnedManager()
+
     class Meta:
         verbose_name = "Категория товара"
         verbose_name_plural = "Категории товаров"
         ordering = ['name']
-        unique_together = ['store', 'name']
+        constraints = [
+            models.UniqueConstraint(fields=['store', 'name'], name='unique_category_per_store')
+        ]
 
     def __str__(self):
         return self.name
@@ -508,14 +511,14 @@ def update_stock_on_batch_change(sender, instance, **kwargs):
                 'quantity': 0
             }
         )
-        
+
         # Обновляем количество
         stock.update_quantity()
-        
+
         if created:
             logger.info(f"✅ Stock created during batch update for: {instance.product.name}")
         else:
             logger.debug(f"✅ Stock updated for: {instance.product.name}")
-            
+
     except Exception as e:
         logger.error(f"❌ Error updating stock for batch {instance.id}: {str(e)}")
