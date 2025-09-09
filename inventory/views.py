@@ -55,22 +55,87 @@ logger = logging.getLogger('inventory')
 
 class SizeInfoPagination(LimitOffsetPagination):
     """
-    Кастомная пагинация для SizeInfo
+    Кастомная пагинация для SizeInfo с информацией о магазине
     """
     default_limit = 20
     limit_query_param = 'limit'
     offset_query_param = 'offset'
     max_limit = 100
 
+    def get_current_store_from_request(self, request):
+        """
+        Безопасное получение текущего магазина из запроса
+        """
+        try:
+            # Пытаемся получить магазин из атрибута пользователя
+            if hasattr(request.user, 'current_store') and request.user.current_store:
+                return request.user.current_store
+
+            # Альтернативный способ - через view, если доступен
+            if hasattr(request, '_request') and hasattr(request._request, 'resolver_match'):
+                view = getattr(request._request.resolver_match, 'func', None)
+                if hasattr(view, 'cls') and hasattr(view.cls, 'get_current_store'):
+                    # Создаем временный экземпляр view для получения магазина
+                    view_instance = view.cls()
+                    view_instance.request = request
+                    return view_instance.get_current_store()
+
+            # Если есть контекст с view
+            if hasattr(self, 'request') and hasattr(self.request, 'parser_context'):
+                view = self.request.parser_context.get('view')
+                if view and hasattr(view, 'get_current_store'):
+                    return view.get_current_store()
+
+        except Exception as e:
+            logger.warning(f"Не удалось получить текущий магазин в пагинации: {e}")
+
+        return None
+
+    def get_store_info(self, request):
+        """
+        Получение информации о магазине для добавления в ответ
+        """
+        current_store = self.get_current_store_from_request(request)
+        if current_store:
+            return {
+                'id': str(current_store.id),
+                'name': current_store.name
+            }
+        return None
+
     def get_paginated_response(self, data):
-        return Response({
+        """
+        Формирование ответа с пагинацией и информацией о магазине
+        """
+        response_data = {
             'count': self.count,
             'limit': self.limit,
             'offset': self.offset,
             'next': self.get_next_link(),
             'previous': self.get_previous_link(),
             'results': data
-        })
+        }
+
+        # Добавляем информацию о магазине, если доступна
+        try:
+            # Получаем request из контекста
+            request = None
+            if hasattr(self, 'request'):
+                request = self.request
+            elif hasattr(self, 'context') and 'request' in self.context:
+                request = self.context['request']
+
+            if request:
+                store_info = self.get_store_info(request)
+                if store_info:
+                    response_data['store_info'] = store_info
+                    logger.debug(f"Добавлена информация о магазине в пагинацию: {store_info['name']}")
+                else:
+                    logger.debug("Информация о магазине недоступна для пагинации")
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении информации о магазине в пагинацию: {e}")
+
+        return Response(response_data)
 
 class CustomPagination(LimitOffsetPagination):
     """
@@ -102,11 +167,143 @@ class ProductCategoryViewSet(StoreViewSetMixin, ModelViewSet):
     ordering_fields = ['name', 'created_at']
     ordering = ['name']
 
+    def get_current_store_safely(self):
+        """Безопасное получение текущего магазина с комплексной обработкой ошибок"""
+        try:
+            current_store = self.get_current_store()
+            if not current_store:
+                logger.warning(f"Не найден текущий магазин для пользователя {self.request.user.username}")
+            return current_store
+        except Exception as e:
+            logger.error(f"Ошибка получения текущего магазина для пользователя {self.request.user.username}: {e}")
+            return None
+
     def get_queryset(self):
-        current_store = getattr(self.request.user, 'current_store', None)
+        """Получение категорий с фильтрацией по текущему магазину"""
+        current_store = self.get_current_store_safely()
         if current_store:
-            return ProductCategory.objects.filter(store=current_store)
+            return ProductCategory.objects.filter(store=current_store).select_related('store')
         return ProductCategory.objects.none()
+
+    def list(self, request, *args, **kwargs):
+        """Улучшенный метод list с комплексным логированием"""
+        logger.info(f"📋 ЗАПРОС СПИСКА КАТЕГОРИЙ - Пользователь: {request.user.username}")
+
+        current_store = self.get_current_store_safely()
+        if not current_store:
+            return Response({
+                'error': 'Текущий магазин недоступен',
+                'detail': 'Пользователь должен быть связан с активным магазином',
+                'results': [],
+                'count': 0
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            # Используем стандартную реализацию DRF list с нашим queryset
+            response = super().list(request, *args, **kwargs)
+
+            # Добавляем информацию о магазине в ответ
+            if isinstance(response.data, dict):
+                response.data['store_info'] = {
+                    'id': str(current_store.id),
+                    'name': current_store.name
+                }
+
+            logger.info(f"✅ Успешно возвращены категории для магазина: {current_store.name}")
+            return response
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка в списке категорий: {e}")
+            return Response({
+                'error': 'Не удалось получить категории',
+                'detail': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['get'])
+    def debug_info(self, request):
+        """
+        Упрощенный endpoint отладки с учетом безопасности
+        Доступен только в режиме разработки
+        """
+        if not settings.DEBUG:
+            return Response({
+                'error': 'Endpoint отладки доступен только в режиме разработки'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # Проверка прав доступа
+        if not request.user.is_staff:
+            return Response({
+                'error': 'Недостаточно прав доступа'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        current_store = self.get_current_store_safely()
+
+        debug_info = {
+            'user_info': {
+                'username': request.user.username,
+                'user_id': request.user.id,
+                'is_authenticated': request.user.is_authenticated,
+                'is_staff': request.user.is_staff,
+            },
+            'store_info': {
+                'has_current_store': current_store is not None,
+                'store_id': str(current_store.id) if current_store else None,
+                'store_name': current_store.name if current_store else None,
+            },
+            'categories_info': {
+                'queryset_count': self.get_queryset().count(),
+            }
+        }
+
+        # Добавляем детальную информацию о категориях, если магазин существует
+        if current_store:
+            try:
+                categories = ProductCategory.objects.filter(store=current_store)
+                debug_info['categories_info'].update({
+                    'categories_count': categories.count(),
+                    'categories_list': [
+                        {
+                            'id': cat.id,
+                            'name': cat.name,
+                            'created_at': cat.created_at.isoformat() if cat.created_at else None
+                        }
+                        for cat in categories[:10]  # Ограничиваем первыми 10 для производительности
+                    ]
+                })
+            except Exception as e:
+                debug_info['categories_info']['error'] = str(e)
+
+        return Response(debug_info)
+
+    def handle_exception(self, exc):
+        """Кастомная обработка исключений с логированием"""
+        logger.error(f"Исключение в ProductCategoryViewSet: {exc}")
+        return super().handle_exception(exc)
+
+    def perform_create(self, serializer):
+        """Обеспечиваем создание категории для текущего магазина"""
+        current_store = self.get_current_store_safely()
+        if not current_store:
+            raise ValidationError("Невозможно создать категорию без текущего магазина")
+
+        serializer.save(store=current_store)
+        logger.info(f"Создана категория '{serializer.instance.name}' для магазина '{current_store.name}'")
+
+    def perform_update(self, serializer):
+        """Логирование обновлений категорий"""
+        old_name = serializer.instance.name
+        serializer.save()
+        new_name = serializer.instance.name
+
+        if old_name != new_name:
+            logger.info(f"Обновлена категория '{old_name}' на '{new_name}'")
+
+    def perform_destroy(self, instance):
+        """Логирование удаления категорий"""
+        category_name = instance.name
+        store_name = instance.store.name
+        super().perform_destroy(instance)
+        logger.info(f"Удалена категория '{category_name}' из магазина '{store_name}'")
 
 
 
@@ -1028,9 +1225,12 @@ class StockViewSet(StoreViewSetMixin, ModelViewSet):
             'reason': reason
         })
 
-class SizeInfoViewSet(ModelViewSet):
+
+
+
+class SizeInfoViewSet(StoreViewSetMixin, ModelViewSet):
     """
-    ViewSet для работы с размерной информацией
+    ViewSet для работы с размерной информацией конкретного магазина
     Поддерживает фильтрацию, поиск, сортировку и опциональную пагинацию
     """
     serializer_class = SizeInfoSerializer
@@ -1039,13 +1239,30 @@ class SizeInfoViewSet(ModelViewSet):
     search_fields = ['size']  # Поиск по размеру
     ordering_fields = ['size', 'chest', 'waist', 'length']  # Поля для сортировки
     ordering = ['size']  # Сортировка по умолчанию
-    pagination_class = OptionalPagination  # Опциональная пагинация
+    pagination_class = SizeInfoPagination  # Используем улучшенную пагинацию
+
+    def get_current_store_safely(self):
+        """Безопасное получение текущего магазина"""
+        try:
+            current_store = self.get_current_store()
+            if not current_store:
+                logger.warning(f"Не найден текущий магазин для пользователя {self.request.user.username}")
+            return current_store
+        except Exception as e:
+            logger.error(f"Ошибка получения текущего магазина: {e}")
+            return None
 
     def get_queryset(self):
         """
-        Возвращает queryset с оптимизацией
+        Возвращает queryset размеров только для текущего магазина
         """
-        return SizeInfo.objects.all().select_related()
+        current_store = self.get_current_store_safely()
+        if current_store:
+            logger.info(f"Получение размеров для магазина: {current_store.name}")
+            return SizeInfo.objects.filter(store=current_store).select_related('store')
+
+        logger.warning("Текущий магазин не найден, возвращаем пустой queryset")
+        return SizeInfo.objects.none()
 
     def get_pagination_params(self, request):
         """
@@ -1069,7 +1286,7 @@ class SizeInfoViewSet(ModelViewSet):
             return 20, 0
 
     @swagger_auto_schema(
-        operation_description="Получить список размерной информации. Если не указаны параметры limit/offset - возвращает все записи без пагинации.",
+        operation_description="Получить список размерной информации текущего магазина. Если не указаны параметры limit/offset - возвращает все записи без пагинации.",
         manual_parameters=[
             openapi.Parameter(
                 'limit',
@@ -1144,7 +1361,7 @@ class SizeInfoViewSet(ModelViewSet):
     )
     def list(self, request, *args, **kwargs):
         """
-        Получить список размерной информации с поддержкой:
+        Получить список размерной информации текущего магазина с поддержкой:
         - опциональной offset/limit пагинации
         - фильтрации по всем полям
         - поиска по размеру
@@ -1152,28 +1369,52 @@ class SizeInfoViewSet(ModelViewSet):
 
         Если не указаны параметры limit/offset - возвращает все записи
         """
+        # Проверяем наличие текущего магазина
+        current_store = self.get_current_store_safely()
+        if not current_store:
+            return Response({
+                'error': 'Текущий магазин не найден',
+                'detail': 'Пользователь должен быть связан с активным магазином',
+                'count': 0,
+                'results': []
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         queryset = self.filter_queryset(self.get_queryset())
 
         # Логируем параметры запроса для отладки
-        logger.info(f"SizeInfo list request - query_params: {dict(request.query_params)}")
+        logger.info(f"SizeInfo list request для магазина {current_store.name} - query_params: {dict(request.query_params)}")
+        logger.info(f"Найдено размеров: {queryset.count()}")
 
-        # Пагинация работает автоматически через OptionalPagination
+        # Пагинация работает автоматически через SizeInfoPagination
         page = self.paginate_queryset(queryset)
 
         if page is not None:
             # Есть пагинация - возвращаем страницу
             serializer = self.get_serializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
+            response = self.get_paginated_response(serializer.data)
+
+            # Добавляем информацию о магазине в ответ (если её еще нет)
+            if 'store_info' not in response.data:
+                response.data['store_info'] = {
+                    'id': str(current_store.id),
+                    'name': current_store.name
+                }
+
+            return response
 
         # Нет пагинации - возвращаем все записи
         serializer = self.get_serializer(queryset, many=True)
         return Response({
             'count': queryset.count(),
+            'store_info': {
+                'id': str(current_store.id),
+                'name': current_store.name
+            },
             'results': serializer.data
         })
 
     @swagger_auto_schema(
-        operation_description="Создать новую размерную информацию",
+        operation_description="Создать новую размерную информацию для текущего магазина",
         request_body=SizeInfoSerializer,
         responses={
             201: SizeInfoSerializer,
@@ -1183,19 +1424,34 @@ class SizeInfoViewSet(ModelViewSet):
     @transaction.atomic
     def create(self, request, *args, **kwargs):
         """
-        Создание новой размерной информации
+        Создание новой размерной информации для текущего магазина
         """
+        current_store = self.get_current_store_safely()
+        if not current_store:
+            return Response({
+                'error': 'Текущий магазин не найден',
+                'detail': 'Невозможно создать размер без активного магазина'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         serializer = self.get_serializer(data=request.data)
         if serializer.is_valid():
-            size_info = serializer.save()
-            logger.info(f"Создана размерная информация: {size_info.size}")
+            # Проверяем уникальность размера в магазине
+            size_name = serializer.validated_data.get('size')
+            if SizeInfo.objects.filter(store=current_store, size=size_name).exists():
+                return Response({
+                    'error': f'Размер "{size_name}" уже существует в магазине "{current_store.name}"'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Автоматически привязываем к текущему магазину
+            size_info = serializer.save(store=current_store)
+            logger.info(f"Создана размерная информация: {size_info.size} для магазина {current_store.name}")
             return Response(serializer.data, status=status.HTTP_201_CREATED)
 
         logger.warning(f"Ошибка валидации при создании размерной информации: {serializer.errors}")
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     @swagger_auto_schema(
-        operation_description="Обновить размерную информацию",
+        operation_description="Обновить размерную информацию текущего магазина",
         request_body=SizeInfoSerializer,
         responses={
             200: SizeInfoSerializer,
@@ -1205,33 +1461,115 @@ class SizeInfoViewSet(ModelViewSet):
     )
     def update(self, request, *args, **kwargs):
         """
-        Обновление размерной информации
+        Обновление размерной информации текущего магазина
         """
+        current_store = self.get_current_store_safely()
+        if not current_store:
+            return Response({
+                'error': 'Текущий магазин не найден'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            instance = self.get_object()
+
+            # Проверяем, что размер принадлежит текущему магазину
+            if instance.store != current_store:
+                logger.warning(f"Попытка изменить размер {instance.size} не своего магазина")
+                return Response({
+                    'error': 'Размер не принадлежит текущему магазину'
+                }, status=status.HTTP_403_FORBIDDEN)
+
+        except Exception as e:
+            logger.error(f"Ошибка получения размера для обновления: {e}")
+            return Response({
+                'error': 'Размер не найден'
+            }, status=status.HTTP_404_NOT_FOUND)
+
         partial = kwargs.pop('partial', False)
-        instance = self.get_object()
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
 
         if serializer.is_valid():
+            # Проверяем уникальность при изменении размера
+            size_name = serializer.validated_data.get('size', instance.size)
+            if size_name != instance.size:
+                if SizeInfo.objects.filter(store=current_store, size=size_name).exists():
+                    return Response({
+                        'error': f'Размер "{size_name}" уже существует в магазине "{current_store.name}"'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
             size_info = serializer.save()
-            logger.info(f"Обновлена размерная информация: {size_info.size}")
+            logger.info(f"Обновлена размерная информация: {size_info.size} для магазина {current_store.name}")
             return Response(serializer.data)
 
         logger.warning(f"Ошибка валидации при обновлении размерной информации: {serializer.errors}")
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-# Дополнительные утилитные views
+    def destroy(self, request, *args, **kwargs):
+        """
+        Удаление размерной информации текущего магазина
+        """
+        current_store = self.get_current_store_safely()
+        if not current_store:
+            return Response({
+                'error': 'Текущий магазин не найден'
+            }, status=status.HTTP_400_BAD_REQUEST)
 
-class InventoryStatsView(generics.GenericAPIView):
+        try:
+            instance = self.get_object()
+
+            # Проверяем, что размер принадлежит текущему магазину
+            if instance.store != current_store:
+                logger.warning(f"Попытка удалить размер {instance.size} не своего магазина")
+                return Response({
+                    'error': 'Размер не принадлежит текущему магазину'
+                }, status=status.HTTP_403_FORBIDDEN)
+
+        except Exception as e:
+            logger.error(f"Ошибка получения размера для удаления: {e}")
+            return Response({
+                'error': 'Размер не найден'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # Проверяем, используется ли размер в товарах этого магазина
+        products_using_size = Product.objects.filter(store=current_store, size=instance).count()
+        batches_using_size = ProductBatch.objects.filter(store=current_store, size=instance).count()
+
+        if products_using_size > 0 or batches_using_size > 0:
+            return Response({
+                'error': 'Размер используется в товарах или партиях магазина',
+                'detail': f'Товаров: {products_using_size}, Партий: {batches_using_size}',
+                'suggestion': 'Удалите сначала все товары и партии с этим размером'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        size_name = instance.size
+        store_name = current_store.name
+
+        instance.delete()
+        logger.info(f"Удалена размерная информация: {size_name} из магазина {store_name}")
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# Дополнительные утилитные views для конкретного магазина
+
+class InventoryStatsView(StoreViewSetMixin, generics.GenericAPIView):
     """
-    Общая статистика по складу
+    Общая статистика по складу конкретного магазина
     """
 
     @swagger_auto_schema(
-        operation_description="Получить общую статистику по складу",
+        operation_description="Получить общую статистику по складу текущего магазина",
         responses={
             200: openapi.Schema(
                 type=openapi.TYPE_OBJECT,
                 properties={
+                    'store_info': openapi.Schema(
+                        type=openapi.TYPE_OBJECT,
+                        properties={
+                            'id': openapi.Schema(type=openapi.TYPE_STRING),
+                            'name': openapi.Schema(type=openapi.TYPE_STRING),
+                        }
+                    ),
                     'total_products': openapi.Schema(type=openapi.TYPE_INTEGER),
                     'total_categories': openapi.Schema(type=openapi.TYPE_INTEGER),
                     'total_stock_value': openapi.Schema(type=openapi.TYPE_NUMBER),
@@ -1241,27 +1579,53 @@ class InventoryStatsView(generics.GenericAPIView):
         }
     )
     def get(self, request):
+        try:
+            current_store = self.get_current_store()
+            if not current_store:
+                return Response({
+                    'error': 'Текущий магазин не найден'
+                }, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"Ошибка получения текущего магазина: {e}")
+            return Response({
+                'error': 'Ошибка получения магазина'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # Фильтруем статистику по текущему магазину
         stats = {
-            'total_products': Product.objects.count(),
-            'total_categories': ProductCategory.objects.count(),
-            'total_attributes': AttributeType.objects.count(),
-            'total_stock_quantity': Stock.objects.aggregate(
-                total=Sum('quantity')
-            )['total'] or 0,
-            'low_stock_alerts': Stock.objects.filter(quantity__lte=10).count(),
-            'out_of_stock': Stock.objects.filter(quantity=0).count(),
-            'total_batches': ProductBatch.objects.count(),
+            'store_info': {
+                'id': str(current_store.id),
+                'name': current_store.name
+            },
+            'total_products': Product.objects.filter(store=current_store).count(),
+            'total_categories': ProductCategory.objects.filter(store=current_store).count(),
+            'total_size_info': SizeInfo.objects.filter(store=current_store).count(),
+            'total_stock_quantity': Stock.objects.filter(
+                product__store=current_store
+            ).aggregate(total=Sum('quantity'))['total'] or 0,
+            'low_stock_alerts': Stock.objects.filter(
+                product__store=current_store,
+                quantity__lte=10
+            ).count(),
+            'out_of_stock': Stock.objects.filter(
+                product__store=current_store,
+                quantity=0
+            ).count(),
+            'total_batches': ProductBatch.objects.filter(
+                product__store=current_store
+            ).count(),
         }
 
-        # Подсчет общей стоимости склада
-        from django.db.models import F
-        total_value = ProductBatch.objects.aggregate(
+        # Подсчет общей стоимости склада для текущего магазина
+        total_value = ProductBatch.objects.filter(
+            product__store=current_store
+        ).aggregate(
             total=Sum(F('quantity') * F('purchase_price'))
         )['total'] or 0
         stats['total_stock_value'] = float(total_value)
 
+        logger.info(f"Получена статистика для магазина {current_store.name}")
         return Response(stats)
-
 
 
 from django.http import FileResponse, HttpResponseNotFound

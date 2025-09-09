@@ -350,48 +350,47 @@ class StoreViewSetMixin:
             save_kwargs['cashier'] = self.request.user
 
         try:
-            # ✅ ВАЖНО: Для Product - особый случай
-            if serializer.Meta.model.__name__ == 'Product':
-                # Если instance уже создан в serializer.create(), просто дополняем его
-                if hasattr(serializer, 'instance') and serializer.instance and not serializer.instance.pk:
-                    instance = serializer.instance
-                    for key, value in save_kwargs.items():
-                        setattr(instance, key, value)
-                    instance.save()
-                    serializer.instance = instance
-                else:
-                    # Обычное сохранение
-                    serializer.save(**save_kwargs)
-            else:
-                # Для всех остальных моделей - обычное сохранение
-                serializer.save(**save_kwargs)
+            # ✅ ИСПРАВЛЕНИЕ: Убираем специальную логику для Product
+            # Для всех моделей используем одинаковый подход
 
-            logger.info(f"✅ Created {serializer.Meta.model.__name__} for store {current_store.name}")
+            # Проверяем, есть ли уже созданный instance без ID
+            if hasattr(serializer, 'instance') and serializer.instance and not serializer.instance.pk:
+                # Если объект создан в serializer.create(), но не сохранен
+                instance = serializer.instance
+                for key, value in save_kwargs.items():
+                    setattr(instance, key, value)
+                instance.save()
+                serializer.instance = instance
+                logger.info(f"✅ Saved existing instance: {serializer.Meta.model.__name__} for store {current_store.name}")
+            else:
+                # Обычное сохранение через serializer.save()
+                serializer.save(**save_kwargs)
+                logger.info(f"✅ Created new {serializer.Meta.model.__name__} for store {current_store.name}")
 
         except Exception as e:
             logger.error(f"❌ Error creating {serializer.Meta.model.__name__}: {str(e)}")
             raise
 
-    def perform_update(self, serializer):
-        """Проверяем принадлежность к магазину при обновлении"""
-        instance = self.get_object()
-        current_store = self.get_current_store()
+        def perform_update(self, serializer):
+            """Проверяем принадлежность к магазину при обновлении"""
+            instance = self.get_object()
+            current_store = self.get_current_store()
 
-        if hasattr(instance, 'store') and current_store:
-            if instance.store != current_store:
-                raise PermissionDenied("Вы не можете редактировать данные другого магазина")
+            if hasattr(instance, 'store') and current_store:
+                if instance.store != current_store:
+                    raise PermissionDenied("Вы не можете редактировать данные другого магазина")
 
-        serializer.save()
+            serializer.save()
 
-    def perform_destroy(self, instance):
-        """Проверяем принадлежность к магазину при удалении"""
-        current_store = self.get_current_store()
+        def perform_destroy(self, instance):
+            """Проверяем принадлежность к магазину при удалении"""
+            current_store = self.get_current_store()
 
-        if hasattr(instance, 'store') and current_store:
-            if instance.store != current_store:
-                raise PermissionDenied("Вы не можете удалять данные другого магазина")
+            if hasattr(instance, 'store') and current_store:
+                if instance.store != current_store:
+                    raise PermissionDenied("Вы не можете удалять данные другого магазина")
 
-        instance.delete()
+            instance.delete()
 
 class StoreSerializerMixin:
     """

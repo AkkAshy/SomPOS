@@ -26,16 +26,27 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(leve
 logger = logging.getLogger('inventory')
 
 
-class SizeInfo(models.Model):
+class SizeInfo(StoreOwnedModel):
     SIZE_CHOICES = [
+        ('XS', 'XS'),
         ('S', 'S'),
         ('M', 'M'),
         ('L', 'L'),
         ('XL', 'XL'),
         ('XXL', 'XXL'),
+        ('XXXL', 'XXXL'),
+        # Можно добавить числовые размеры
+        ('38', '38'),
+        ('40', '40'),
+        ('42', '42'),
+        ('44', '44'),
+        ('46', '46'),
+        ('48', '48'),
+        ('50', '50'),
+        ('52', '52'),
+        ('54', '54'),
+        ('56', '56'),
     ]
-
-
 
     size = models.CharField(max_length=50, verbose_name="Размер")
 
@@ -58,14 +69,20 @@ class SizeInfo(models.Model):
         verbose_name="Длина"
     )
 
+    objects = StoreOwnedManager()
 
     class Meta:
         verbose_name = "Размерная информация"
         verbose_name_plural = "Размерные информации"
-        unique_together = ('size',)
+        constraints = [
+            models.UniqueConstraint(
+                fields=['store', 'size'],
+                name='unique_size_per_store'
+            )
+        ]
 
     def __str__(self):
-        return f"{self.size}"
+        return f"{self.size} ({self.store.name if self.store else 'Без магазина'})"
 
 
 class ProductCategory(StoreOwnedModel):

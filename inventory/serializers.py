@@ -99,11 +99,12 @@ class ProductCategorySerializer(serializers.ModelSerializer):
 
         return value
 
-    def create(self, validated_data):
-        """
-        При создании НЕ устанавливаем store здесь - это сделает StoreViewSetMixin.perform_create()
-        """
-        return ProductCategory(**validated_data)
+    # ✅ ИСПРАВЛЕНИЕ: Убираем кастомный create и используем стандартный
+    # def create(self, validated_data):
+    #     """
+    #     При создании НЕ устанавливаем store здесь - это сделает StoreViewSetMixin.perform_create()
+    #     """
+    #     return ProductCategory(**validated_data)
 
     def update(self, instance, validated_data):
         """
@@ -152,13 +153,14 @@ class SizeChartSerializer(serializers.ModelSerializer):
         model = SizeChart
         fields = ['id', 'name', 'values']
 
-class SizeInfoSerializer(serializers.ModelSerializer):
+class SizeInfoSerializer(StoreSerializerMixin, serializers.ModelSerializer):
     size = serializers.CharField()
+    store_name = serializers.CharField(source='store.name', read_only=True)
 
     class Meta:
         model = SizeInfo
-        fields = ['id','size', 'chest', 'waist', 'length']
-        read_only_fields = ['id']
+        fields = ['id', 'size', 'chest', 'waist', 'length', 'store_name']
+        read_only_fields = ['id', 'store_name']
         swagger_schema_fields = {
             'example': {
                 'size': 'XXL',
@@ -167,6 +169,41 @@ class SizeInfoSerializer(serializers.ModelSerializer):
                 'length': 70
             }
         }
+
+    def validate_size(self, value):
+        """Валидация размера"""
+        if not value or not value.strip():
+            raise serializers.ValidationError("Размер не может быть пустым")
+
+        # Приводим к верхнему регистру для консистентности
+        value = value.strip().upper()
+
+        # Проверяем длину
+        if len(value) > 50:
+            raise serializers.ValidationError("Размер не может быть длиннее 50 символов")
+
+        return value
+
+    def validate(self, attrs):
+        """Валидация на уровне объекта"""
+        size = attrs.get('size')
+        chest = attrs.get('chest')
+        waist = attrs.get('waist')
+        length = attrs.get('length')
+
+        # Проверяем, что хотя бы одно измерение указано
+        if not any([chest, waist, length]):
+            raise serializers.ValidationError(
+                "Необходимо указать хотя бы одно измерение (грудь, талия или длина)"
+            )
+
+        # Проверяем логичность размеров
+        if chest and waist and chest < waist:
+            raise serializers.ValidationError(
+                "Обхват груди не может быть меньше обхвата талии"
+            )
+
+        return attrs
 
 
 ############################################################## Продукты #############################################################

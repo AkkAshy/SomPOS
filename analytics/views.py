@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 
 class AnalyticsPermission(permissions.BasePermission):
     def has_permission(self, request, view):
-        return request.user.groups.filter(name__in=['admin', 'manager']).exists()
+        return request.user.groups.filter(name__in=['admin', 'manager', 'owner']).exists()
+
 
 
 class SalesAnalyticsViewSet(StoreViewSetMixin, viewsets.ReadOnlyModelViewSet):  # ← ДОБАВЛЯЕМ МИКСИН
