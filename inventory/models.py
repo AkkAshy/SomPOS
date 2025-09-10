@@ -196,7 +196,22 @@ class Product(StoreOwnedModel):
         related_name='products_created',
         verbose_name="Создан пользователем"
     )
+    is_deleted = models.BooleanField(
+        default=False,
+        verbose_name="Удален",
+        help_text="Мягкое удаление - товар скрыт, но сохранен для истории"
+    )
+    deleted_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Дата удаления"
+    )
+
+    # Переопределяем manager для исключения удаленных
     objects = StoreOwnedManager()
+
+    # Новый manager для работы с удаленными
+    all_objects = models.Manager()  # Включает удаленные
 
     @classmethod
     def generate_unique_barcode(cls):
@@ -341,11 +356,28 @@ class Product(StoreOwnedModel):
         verbose_name_plural = "Товары"
         indexes = [
             models.Index(fields=['name', 'barcode']),
-            models.Index(fields=['store', 'name']),  # ← ДОБАВИТЬ
-            models.Index(fields=['store', 'barcode']),  # ← ДОБАВИТЬ
+            models.Index(fields=['store', 'name']),
+            models.Index(fields=['store', 'barcode']),
+            models.Index(fields=['is_deleted']),  # ← Новый индекс
         ]
         unique_together = ['store', 'barcode']
+    def soft_delete(self):
+        """Мягкое удаление товара"""
+        from django.utils import timezone
+        self.is_deleted = True
+        self.deleted_at = timezone.now()
+        self.save(update_fields=['is_deleted', 'deleted_at'])
 
+        # Также помечаем Stock как неактивный
+        if hasattr(self, 'stock'):
+            self.stock.quantity = 0
+            self.stock.save()
+
+    def restore(self):
+        """Восстановление товара"""
+        self.is_deleted = False
+        self.deleted_at = None
+        self.save(update_fields=['is_deleted', 'deleted_at'])
 
 class ProductAttribute(models.Model):
     product = models.ForeignKey(

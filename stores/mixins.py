@@ -41,12 +41,24 @@ class StoreFilteredQuerySet(models.QuerySet):
         return self.none()
 
 
+# class StoreOwnedManager(models.Manager):
+#     """
+#     Менеджер для моделей, принадлежащих магазину
+#     """
+#     def get_queryset(self):
+#         return StoreFilteredQuerySet(self.model, using=self._db)
+
+#     def for_store(self, store):
+#         return self.get_queryset().for_store(store)
+
+#     def for_user(self, user):
+#         return self.get_queryset().for_user(user)
+
 class StoreOwnedManager(models.Manager):
-    """
-    Менеджер для моделей, принадлежащих магазину
-    """
     def get_queryset(self):
-        return StoreFilteredQuerySet(self.model, using=self._db)
+        return StoreFilteredQuerySet(self.model, using=self._db).filter(
+            is_deleted=False  # ← Исключаем удаленные по умолчанию
+        )
 
     def for_store(self, store):
         return self.get_queryset().for_store(store)
@@ -54,6 +66,13 @@ class StoreOwnedManager(models.Manager):
     def for_user(self, user):
         return self.get_queryset().for_user(user)
 
+    def include_deleted(self):
+        """Получить все записи включая удаленные"""
+        return super().get_queryset()
+
+    def only_deleted(self):
+        """Получить только удаленные записи"""
+        return super().get_queryset().filter(is_deleted=True)
 
 # class StoreViewSetMixin:
 #     """

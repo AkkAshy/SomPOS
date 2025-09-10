@@ -1031,6 +1031,140 @@ class ProductViewSet(
             'by_size': sizes_list
         })
 
+    def destroy(self, request, *args, **kwargs):
+        """
+        Мягкое удаление товара вместо физического удаления
+        """
+        instance = self.get_object()
+
+        # Проверяем, используется ли товар в активных транзакциях
+        from sales.models import TransactionItem, Transaction
+
+        active_transactions = TransactionItem.objects.filter(
+            product=instance,
+            transaction__status__in=['pending', 'completed']
+        ).exists()
+
+        if active_transactions:
+            # Делаем мягкое удаление
+            instance.soft_delete()
+            logger.info(f"Product {instance.name} soft deleted due to transaction history")
+
+            return Response({
+                'message': 'Товар помечен как удаленный (есть история продаж)',
+                'action': 'soft_deleted',
+                'product_id': instance.id,
+                'can_restore': True
+            }, status=status.HTTP_200_OK)
+        else:
+            # Если нет транзакций, можно удалить физически
+            product_name = instance.name
+            instance.delete()
+            logger.info(f"Product {product_name} physically deleted (no transaction history)")
+
+            return Response({
+                'message': 'Товар полностью удален',
+                'action': 'hard_deleted',
+                'can_restore': False
+            }, status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=['post'])
+    def restore(self, request, pk=None):
+        """
+        Восстановление мягко удаленного товара
+        """
+        # Получаем товар включая удаленные
+        try:
+            product = Product.all_objects.get(pk=pk, is_deleted=True)
+        except Product.DoesNotExist:
+            return Response(
+                {'error': 'Удаленный товар не найден'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Проверяем принадлежность к магазину
+        current_store = self.get_current_store()
+        if product.store != current_store:
+            return Response(
+                {'error': 'Товар не принадлежит вашему магазину'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Восстанавливаем
+        product.restore()
+
+        serializer = self.get_serializer(product)
+        return Response({
+            'message': 'Товар успешно восстановлен',
+            'product': serializer.data
+        })
+
+    @action(detail=False, methods=['get'])
+    def deleted(self, request):
+        """
+        Список удаленных товаров
+        """
+        current_store = self.get_current_store()
+        if not current_store:
+            return Response({'error': 'Магазин не определен'}, status=400)
+
+        deleted_products = Product.all_objects.filter(
+            store=current_store,
+            is_deleted=True
+        ).select_related('category')
+
+        serializer = self.get_serializer(deleted_products, many=True)
+        return Response({
+            'deleted_products': serializer.data,
+            'count': deleted_products.count()
+        })
+
+    @action(detail=True, methods=['delete'])
+    def force_delete(self, request, pk=None):
+        """
+        Принудительное физическое удаление (только для админов)
+        """
+        # Проверяем права (только owner/admin)
+        current_store = self.get_current_store()
+        if not hasattr(request.user, 'store_role') or request.user.store_role not in ['owner', 'admin']:
+            return Response(
+                {'error': 'Недостаточно прав для принудительного удаления'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        try:
+            product = Product.all_objects.get(pk=pk)
+        except Product.DoesNotExist:
+            return Response(
+                {'error': 'Товар не найден'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Проверяем принадлежность к магазину
+        if product.store != current_store:
+            return Response(
+                {'error': 'Товар не принадлежит вашему магазину'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Получаем информацию о связанных объектах
+        from sales.models import TransactionItem
+        transaction_items = TransactionItem.objects.filter(product=product)
+
+        if transaction_items.exists():
+            return Response({
+                'error': 'Нельзя удалить товар с историей продаж',
+                'transaction_count': transaction_items.count(),
+                'suggestion': 'Используйте мягкое удаление'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Удаляем физически
+        product_name = product.name
+        product.delete()
+
+        logger.warning(f"Product {product_name} force deleted by {request.user.username}")
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=False, methods=['post'])
     def check_sizes(self, request):
