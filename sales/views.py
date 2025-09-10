@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 class IsCashierOrManagerOrAdmin(permissions.BasePermission):
     def has_permission(self, request, view):
-        return request.user.groups.filter(name__in=['admin', 'manager', 'cashier']).exists()
+        return request.user.groups.filter(name__in=['admin', 'manager', 'cashier', 'owner']).exists()
 
 class TransactionViewSet(StoreViewSetMixin, viewsets.ModelViewSet):
     """
@@ -33,26 +33,44 @@ class TransactionViewSet(StoreViewSetMixin, viewsets.ModelViewSet):
     serializer_class = TransactionSerializer
     permission_classes = [permissions.IsAuthenticated, IsCashierOrManagerOrAdmin]
     filter_backends = [DjangoFilterBackend, OrderingFilter]
+    queryset = Transaction.objects.all()
     ordering_fields = ['created_at', 'total_amount', 'status']
     ordering = ['-created_at']
 
     def get_queryset(self):
         """
-        Возвращает транзакции только текущего магазина
+        ✅ ИСПРАВЛЕННАЯ версия - использует StoreViewSetMixin для получения магазина
         """
-        # Базовый queryset
-        queryset = Transaction.objects.select_related(
-            'customer',
-            'cashier',
-            'store'
-        ).prefetch_related(
-            'items',
-            'items__product'
-        )
+        logger.info(f"🔍 TransactionViewSet.get_queryset() для пользователя: {self.request.user.username}")
 
-        # Применяем фильтрацию по магазину из миксина
-        # Миксин сам отфильтрует по текущему магазину
-        return super().get_queryset()
+        # Используем метод из StoreViewSetMixin для получения текущего магазина
+        try:
+            current_store = self.get_current_store()
+            logger.info(f"   Current store: {current_store}")
+
+            if current_store:
+                # Базовый queryset с фильтрацией по магазину
+                queryset = Transaction.objects.filter(
+                    store=current_store
+                ).select_related(
+                    'customer',
+                    'cashier',
+                    'store'
+                ).prefetch_related(
+                    'items',
+                    'items__product'
+                )
+
+                count = queryset.count()
+                logger.info(f"   ✅ Найдено {count} транзакций для магазина {current_store.name}")
+                return queryset
+            else:
+                logger.warning(f"   ❌ Магазин не найден для пользователя {self.request.user.username}")
+                return Transaction.objects.none()
+
+        except Exception as e:
+            logger.error(f"   ❌ Ошибка в get_queryset: {e}")
+            return Transaction.objects.none()
 
     @swagger_auto_schema(
         operation_description="Получить список продаж текущего магазина",
@@ -764,31 +782,117 @@ from django.db.models import IntegerField, DecimalField, ExpressionWrapper
 from django.utils.dateparse import parse_date
 from django.db.models import Q
 
-class CashierSalesSummaryView(APIView):
-    pagination_class = pagination.PageNumberPagination
+class CashierSalesSummaryView(StoreViewSetMixin, APIView):
+    """
+    Сводка продаж по кассирам для текущего магазина
+    """
+    permission_classes = [IsAuthenticated]
 
+    @swagger_auto_schema(
+        operation_description="Получить сводку продаж по кассирам для текущего магазина",
+        manual_parameters=[
+            openapi.Parameter(
+                'cashier_id',
+                openapi.IN_QUERY,
+                description="ID конкретного кассира",
+                type=openapi.TYPE_INTEGER,
+                required=False
+            ),
+            openapi.Parameter(
+                'start_date',
+                openapi.IN_QUERY,
+                description="Дата начала периода (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+                format=openapi.FORMAT_DATE,
+                required=False
+            ),
+            openapi.Parameter(
+                'end_date',
+                openapi.IN_QUERY,
+                description="Дата окончания периода (YYYY-MM-DD)",
+                type=openapi.TYPE_STRING,
+                format=openapi.FORMAT_DATE,
+                required=False
+            ),
+            openapi.Parameter(
+                'status',
+                openapi.IN_QUERY,
+                description="Статус транзакций (по умолчанию: completed)",
+                type=openapi.TYPE_STRING,
+                enum=['completed', 'pending', 'refunded'],
+                required=False
+            ),
+            openapi.Parameter(
+                'detailed',
+                openapi.IN_QUERY,
+                description="Получить детальную статистику (true/false)",
+                type=openapi.TYPE_BOOLEAN,
+                required=False
+            ),
+        ],
+        responses={200: 'Сводка по кассирам'}
+    )
     def get(self, request):
+        logger.info(f"📊 ЗАПРОС СВОДКИ КАССИРОВ - Пользователь: {request.user.username}")
+
+        # Получаем текущий магазин
+        current_store = self.get_current_store()
+        if not current_store:
+            return Response({
+                'error': 'Магазин не определен',
+                'detail': 'Пользователь должен быть связан с активным магазином'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        # Получаем параметры
         cashier_id = request.query_params.get('cashier_id')
         start_date = request.query_params.get('start_date')
         end_date = request.query_params.get('end_date')
+        transaction_status = request.query_params.get('status', 'completed')
+        detailed = request.query_params.get('detailed', 'false').lower() == 'true'
 
-        # Базовый queryset
-        queryset = TransactionItem.objects.all()
+        # Базовый queryset с фильтрацией по магазину
+        queryset = TransactionItem.objects.filter(
+            transaction__store=current_store,
+            transaction__status=transaction_status
+        ).select_related('transaction__cashier', 'transaction__store')
 
-        # Фильтрация по кассиру
+        # Применяем фильтры
         if cashier_id:
-            queryset = queryset.filter(transaction__cashier_id=cashier_id)
+            try:
+                queryset = queryset.filter(transaction__cashier_id=int(cashier_id))
+            except (ValueError, TypeError):
+                return Response({
+                    'error': 'Некорректный cashier_id'
+                }, status=status.HTTP_400_BAD_REQUEST)
 
-        # Фильтрация по дате
         if start_date:
-            queryset = queryset.filter(transaction__created_at__date__gte=parse_date(start_date))
-        if end_date:
-            queryset = queryset.filter(transaction__created_at__date__lte=parse_date(end_date))
+            try:
+                start_date_parsed = parse_date(start_date)
+                if not start_date_parsed:
+                    raise ValueError
+                queryset = queryset.filter(transaction__created_at__date__gte=start_date_parsed)
+            except ValueError:
+                return Response({
+                    'error': 'Некорректный формат start_date. Используйте YYYY-MM-DD'
+                }, status=status.HTTP_400_BAD_REQUEST)
 
-        # Агрегация
-        queryset = queryset.values(
+        if end_date:
+            try:
+                end_date_parsed = parse_date(end_date)
+                if not end_date_parsed:
+                    raise ValueError
+                queryset = queryset.filter(transaction__created_at__date__lte=end_date_parsed)
+            except ValueError:
+                return Response({
+                    'error': 'Некорректный формат end_date. Используйте YYYY-MM-DD'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Агрегация данных
+        aggregated_data = queryset.values(
             'transaction__cashier_id',
-            'transaction__cashier__username'
+            'transaction__cashier__username',
+            'transaction__cashier__first_name',
+            'transaction__cashier__last_name'
         ).annotate(
             total_quantity=Coalesce(Sum('quantity'), 0, output_field=IntegerField()),
             total_amount=Coalesce(
@@ -801,19 +905,120 @@ class CashierSalesSummaryView(APIView):
                 0,
                 output_field=DecimalField(max_digits=12, decimal_places=2)
             )
+        ).order_by('-total_amount')
+
+        # Формируем базовые данные
+        cashiers_data = []
+        for entry in aggregated_data:
+            if entry['transaction__cashier_id'] is not None:
+                first_name = entry.get('transaction__cashier__first_name', '') or ''
+                last_name = entry.get('transaction__cashier__last_name', '') or ''
+                full_name = f"{first_name} {last_name}".strip()
+
+                cashier_data = {
+                    'cashier_id': entry['transaction__cashier_id'],
+                    'cashier_name': entry['transaction__cashier__username'],
+                    'cashier_full_name': full_name if full_name else entry['transaction__cashier__username'],
+                    'total_quantity': entry['total_quantity'],
+                    'total_amount': float(entry['total_amount']),
+                }
+
+                # Добавляем детальную информацию если запрошена
+                if detailed and cashier_id and int(cashier_id) == entry['transaction__cashier_id']:
+                    cashier_data.update(self._get_detailed_stats(
+                        current_store,
+                        entry['transaction__cashier_id'],
+                        start_date,
+                        end_date
+                    ))
+
+                cashiers_data.append(cashier_data)
+
+        # Формируем ответ
+        response_data = {
+            'store_info': {
+                'id': str(current_store.id),
+                'name': current_store.name
+            },
+            'filters': {
+                'cashier_id': cashier_id,
+                'start_date': start_date,
+                'end_date': end_date,
+                'status': transaction_status,
+                'detailed': detailed
+            },
+            'cashiers': cashiers_data
+        }
+
+        return Response(response_data)
+
+    def _get_detailed_stats(self, store, cashier_id, start_date=None, end_date=None):
+        """Получить детальную статистику для кассира"""
+        from sales.models import Transaction
+        from django.db.models import Count, Avg
+        from django.db.models.functions import TruncDate
+
+        # Базовый queryset для транзакций кассира
+        transactions_qs = Transaction.objects.filter(
+            store=store,
+            cashier_id=cashier_id,
+            status='completed'
         )
 
-        data = [
-            {
-                'cashier_id': entry['transaction__cashier_id'],
-                'cashier_name': entry['transaction__cashier__username'],
-                'total_quantity': entry['total_quantity'],
-                'total_amount': entry['total_amount']
+        # Применяем фильтры по дате
+        if start_date:
+            transactions_qs = transactions_qs.filter(created_at__date__gte=parse_date(start_date))
+        if end_date:
+            transactions_qs = transactions_qs.filter(created_at__date__lte=parse_date(end_date))
+
+        # Статистика по дням
+        daily_stats = transactions_qs.annotate(
+            date=TruncDate('created_at')
+        ).values('date').annotate(
+            transactions_count=Count('id'),
+            daily_total=Sum('total_amount')
+        ).order_by('-date')[:7]  # Последние 7 дней
+
+        # Топ товары
+        top_products = TransactionItem.objects.filter(
+            transaction__store=store,
+            transaction__cashier_id=cashier_id,
+            transaction__status='completed'
+        )
+
+        if start_date:
+            top_products = top_products.filter(transaction__created_at__date__gte=parse_date(start_date))
+        if end_date:
+            top_products = top_products.filter(transaction__created_at__date__lte=parse_date(end_date))
+
+        top_products = top_products.values(
+            'product__name'
+        ).annotate(
+            quantity_sold=Sum('quantity'),
+            revenue=Sum(F('quantity') * F('price'))
+        ).order_by('-quantity_sold')[:5]
+
+        return {
+            'detailed_stats': {
+                'total_transactions': transactions_qs.count(),
+                'average_transaction': float(transactions_qs.aggregate(
+                    avg=Avg('total_amount')
+                )['avg'] or 0),
+                'daily_stats': [
+                    {
+                        'date': stat['date'].isoformat(),
+                        'transactions_count': stat['transactions_count'],
+                        'daily_total': float(stat['daily_total'])
+                    }
+                    for stat in daily_stats
+                ],
+                'top_products': [
+                    {
+                        'product_name': product['product__name'],
+                        'quantity_sold': product['quantity_sold'],
+                        'revenue': float(product['revenue'])
+                    }
+                    for product in top_products
+                ]
             }
-            for entry in queryset if entry['transaction__cashier_id'] is not None
-        ]
-
-        serializer = CashierAggregateSerializer(data, many=True)
-        return Response(serializer.data)
-
-
+        }
