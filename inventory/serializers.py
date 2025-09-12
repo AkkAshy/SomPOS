@@ -185,22 +185,14 @@ class SizeInfoSerializer(StoreSerializerMixin, serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
-        """Валидация на уровне объекта"""
+        attrs = super().validate(attrs)
+        request = self.context['request']
+        store = getattr(request.user, 'store', None)  # или откуда у тебя магазин берётся
         size = attrs.get('size')
-        chest = attrs.get('chest')
-        waist = attrs.get('waist')
-        length = attrs.get('length')
 
-        # Проверяем, что хотя бы одно измерение указано
-        if not any([chest, waist, length]):
+        if SizeInfo.objects.filter(store=store, size=size).exists():
             raise serializers.ValidationError(
-                "Необходимо указать хотя бы одно измерение (грудь, талия или длина)"
-            )
-
-        # Проверяем логичность размеров
-        if chest and waist and chest < waist:
-            raise serializers.ValidationError(
-                "Обхват груди не может быть меньше обхвата талии"
+                f"Размер '{size}' уже существует в этом магазине"
             )
 
         return attrs

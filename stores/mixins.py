@@ -41,24 +41,23 @@ class StoreFilteredQuerySet(models.QuerySet):
         return self.none()
 
 
-# class StoreOwnedManager(models.Manager):
-#     """
-#     Менеджер для моделей, принадлежащих магазину
-#     """
-#     def get_queryset(self):
-#         return StoreFilteredQuerySet(self.model, using=self._db)
-
-#     def for_store(self, store):
-#         return self.get_queryset().for_store(store)
-
-#     def for_user(self, user):
-#         return self.get_queryset().for_user(user)
-
 class StoreOwnedManager(models.Manager):
+    """
+    ✅ ИСПРАВЛЕННЫЙ менеджер для моделей, принадлежащих магазину
+    """
     def get_queryset(self):
-        return StoreFilteredQuerySet(self.model, using=self._db).filter(
-            is_deleted=False  # ← Исключаем удаленные по умолчанию
-        )
+        """
+        Возвращает queryset с фильтрацией удаленных записей (если поле есть)
+        """
+        queryset = StoreFilteredQuerySet(self.model, using=self._db)
+
+        # ✅ ИСПРАВЛЕНИЕ: Проверяем есть ли поле is_deleted перед фильтрацией
+        if hasattr(self.model, '_meta'):
+            field_names = [field.name for field in self.model._meta.get_fields()]
+            if 'is_deleted' in field_names:
+                queryset = queryset.filter(is_deleted=False)
+
+        return queryset
 
     def for_store(self, store):
         return self.get_queryset().for_store(store)
@@ -68,173 +67,21 @@ class StoreOwnedManager(models.Manager):
 
     def include_deleted(self):
         """Получить все записи включая удаленные"""
-        return super().get_queryset()
+        return StoreFilteredQuerySet(self.model, using=self._db)
 
     def only_deleted(self):
         """Получить только удаленные записи"""
-        return super().get_queryset().filter(is_deleted=True)
+        queryset = StoreFilteredQuerySet(self.model, using=self._db)
 
-# class StoreViewSetMixin:
-#     """
-#     Миксин для ViewSet'ов с автоматической фильтрацией по магазину
-#     """
-#     def get_current_store(self):
-#         """Получить текущий магазин с резервными способами"""
-#         user = self.request.user
+        # Проверяем есть ли поле is_deleted
+        if hasattr(self.model, '_meta'):
+            field_names = [field.name for field in self.model._meta.get_fields()]
+            if 'is_deleted' in field_names:
+                return queryset.filter(is_deleted=True)
 
-#         # Способ 1: Из атрибутов пользователя (установлено middleware)
-#         if hasattr(user, 'current_store') and user.current_store:
-#             logger.debug(f"✅ Store from user attribute: {user.current_store.name}")
-#             return user.current_store
+        return queryset.none()
 
-#         # ✅ ДОБАВЛЯЕМ: Способ 2 - через Employee модель (ваш основной случай)
-#         if hasattr(user, 'employee') and user.employee and user.employee.store:
-#             store = user.employee.store
-#             logger.debug(f"✅ Store from Employee model: {store.name}")
-#             # Кешируем для следующих запросов
-#             user.current_store = store
-#             return store
 
-#         # Способ 3: Из JWT токена напрямую
-#         try:
-#             auth_header = self.request.META.get('HTTP_AUTHORIZATION', '')
-#             if auth_header.startswith('Bearer '):
-#                 token = auth_header.split(' ')[1]
-#                 from rest_framework_simplejwt.tokens import AccessToken
-#                 decoded_token = AccessToken(token)
-#                 store_id = decoded_token.get('store_id')
-
-#                 if store_id:
-#                     from stores.models import Store
-#                     store = Store.objects.get(id=store_id, is_active=True)
-#                     logger.debug(f"✅ Store from JWT token: {store.name}")
-#                     # Кешируем для следующих запросов
-#                     user.current_store = store
-#                     return store
-#         except Exception as e:
-#             logger.debug(f"Failed to get store from JWT: {e}")
-
-#         # ✅ ИСПРАВЛЯЕМ: Способ 4 - для админов берем первый доступный магазин
-#         if user.groups.filter(name='admin').exists():
-#             try:
-#                 from stores.models import Store
-#                 first_store = Store.objects.filter(is_active=True).first()
-#                 if first_store:
-#                     logger.debug(f"✅ Store for admin from first available: {first_store.name}")
-#                     user.current_store = first_store
-#                     return first_store
-#             except Exception as e:
-#                 logger.debug(f"Failed to get first store for admin: {e}")
-
-#         # ✅ ДОБАВЛЯЕМ: Способ 5 - из параметров запроса (для тестирования)
-#         store_id = self.request.query_params.get('store_id')
-#         if store_id:
-#             try:
-#                 from stores.models import Store
-#                 store = Store.objects.get(id=store_id, is_active=True)
-#                 logger.debug(f"✅ Store from query parameter: {store.name}")
-#                 return store
-#             except Exception as e:
-#                 logger.debug(f"Invalid store_id parameter: {store_id}, error: {e}")
-
-#         logger.warning(f"❌ No store found for user {user.username}")
-#         return None
-
-#     def get_queryset(self):
-#         """Автоматически фильтруем по магазину"""
-#         queryset = super().get_queryset()
-
-#         # Проверяем, что модель поддерживает магазины
-#         if not hasattr(queryset.model, 'store'):
-#             logger.debug(f"Model {queryset.model.__name__} doesn't have store field, skipping filter")
-#             return queryset
-
-#         # Получаем текущий магазин
-#         current_store = self.get_current_store()
-
-#         if current_store:
-#             queryset = queryset.filter(store=current_store)
-#             logger.debug(f"✅ Filtered queryset by store: {current_store.name}")
-#         else:
-#             # ✅ ИСПРАВЛЯЕМ: Для сканирования не блокируем доступ полностью
-#             # Вместо пустого queryset, логируем предупреждение
-#             logger.warning(f"⚠️ No store found for {queryset.model.__name__}, returning unfiltered queryset")
-#             # Для некоторых операций (как сканирование) может потребоваться доступ ко всем данным
-#             # queryset = queryset.none()  # Закомментируем эту строку
-
-#         return queryset
-
-#     def perform_create(self, serializer):
-#         """✅ ИСПРАВЛЕННОЕ создание с правильным порядком операций"""
-#         current_store = self.get_current_store()
-
-#         if not current_store:
-#             logger.error(f"❌ Cannot create {serializer.Meta.model.__name__}: no store found")
-#             raise ValidationError({
-#                 'non_field_errors': ['Магазин не определен. Переавторизуйтесь или выберите магазин.'],
-#                 'debug_info': {
-#                     'user_id': self.request.user.id,
-#                     'username': self.request.user.username,
-#                     'has_current_store': hasattr(self.request.user, 'current_store'),
-#                     'current_store_value': getattr(self.request.user, 'current_store', None),
-#                     'has_employee': hasattr(self.request.user, 'employee'),
-#                     'employee_store': getattr(self.request.user.employee, 'store', None) if hasattr(self.request.user, 'employee') and self.request.user.employee else None
-#                 }
-#             })
-
-#         # Подготавливаем данные для сохранения
-#         save_kwargs = {'store': current_store}
-
-#         # Дополнительные поля
-#         if hasattr(serializer.Meta.model, 'created_by'):
-#             save_kwargs['created_by'] = self.request.user
-
-#         if hasattr(serializer.Meta.model, 'cashier'):
-#             save_kwargs['cashier'] = self.request.user
-
-#         try:
-#             # ✅ ВАЖНО: Для Product - особый случай
-#             if serializer.Meta.model.__name__ == 'Product':
-#                 # Если instance уже создан в serializer.create(), просто дополняем его
-#                 if hasattr(serializer, 'instance') and serializer.instance and not serializer.instance.pk:
-#                     instance = serializer.instance
-#                     for key, value in save_kwargs.items():
-#                         setattr(instance, key, value)
-#                     instance.save()
-#                     serializer.instance = instance
-#                 else:
-#                     # Обычное сохранение
-#                     serializer.save(**save_kwargs)
-#             else:
-#                 # Для всех остальных моделей - обычное сохранение
-#                 serializer.save(**save_kwargs)
-
-#             logger.info(f"✅ Created {serializer.Meta.model.__name__} for store {current_store.name}")
-
-#         except Exception as e:
-#             logger.error(f"❌ Error creating {serializer.Meta.model.__name__}: {str(e)}")
-#             raise
-
-#     def perform_update(self, serializer):
-#         """Проверяем принадлежность к магазину при обновлении"""
-#         instance = self.get_object()
-#         current_store = self.get_current_store()
-
-#         if hasattr(instance, 'store') and current_store:
-#             if instance.store != current_store:
-#                 raise PermissionDenied("Вы не можете редактировать данные другого магазина")
-
-#         serializer.save()
-
-#     def perform_destroy(self, instance):
-#         """Проверяем принадлежность к магазину при удалении"""
-#         current_store = self.get_current_store()
-
-#         if hasattr(instance, 'store') and current_store:
-#             if instance.store != current_store:
-#                 raise PermissionDenied("Вы не можете удалять данные другого магазина")
-
-#         instance.delete()
 class StoreViewSetMixin:
     """
     Миксин для ViewSet'ов с автоматической фильтрацией по магазину
@@ -390,26 +237,27 @@ class StoreViewSetMixin:
             logger.error(f"❌ Error creating {serializer.Meta.model.__name__}: {str(e)}")
             raise
 
-        def perform_update(self, serializer):
-            """Проверяем принадлежность к магазину при обновлении"""
-            instance = self.get_object()
-            current_store = self.get_current_store()
+    def perform_update(self, serializer):
+        """Проверяем принадлежность к магазину при обновлении"""
+        instance = self.get_object()
+        current_store = self.get_current_store()
 
-            if hasattr(instance, 'store') and current_store:
-                if instance.store != current_store:
-                    raise PermissionDenied("Вы не можете редактировать данные другого магазина")
+        if hasattr(instance, 'store') and current_store:
+            if instance.store != current_store:
+                raise PermissionDenied("Вы не можете редактировать данные другого магазина")
 
-            serializer.save()
+        serializer.save()
 
-        def perform_destroy(self, instance):
-            """Проверяем принадлежность к магазину при удалении"""
-            current_store = self.get_current_store()
+    def perform_destroy(self, instance):
+        """Проверяем принадлежность к магазину при удалении"""
+        current_store = self.get_current_store()
 
-            if hasattr(instance, 'store') and current_store:
-                if instance.store != current_store:
-                    raise PermissionDenied("Вы не можете удалять данные другого магазина")
+        if hasattr(instance, 'store') and current_store:
+            if instance.store != current_store:
+                raise PermissionDenied("Вы не можете удалять данные другого магазина")
 
-            instance.delete()
+        instance.delete()
+
 
 class StoreSerializerMixin:
     """
@@ -420,8 +268,6 @@ class StoreSerializerMixin:
         # Убираем поле store из сериализатора, если оно есть
         if 'store' in self.fields:
             self.fields.pop('store')
-
-
 
 
 class StorePermissionMixin:

@@ -1,3 +1,4 @@
+# inventory/models.py - ИСПРАВЛЕННАЯ ВЕРСИЯ
 import logging
 from django.db import models
 from django.core.validators import MinValueValidator
@@ -137,12 +138,12 @@ class AttributeValue(models.Model):
     def __str__(self):
         return f"{self.attribute_type.name}: {self.value} ({self.slug})"
 
+
 class Product(StoreOwnedModel):
     UNIT_CHOICES = [
         ('piece', 'Штука')
     ]
     name = models.CharField(max_length=255, verbose_name="Название")
-
 
     barcode = models.CharField(
         max_length=100,
@@ -196,6 +197,8 @@ class Product(StoreOwnedModel):
         related_name='products_created',
         verbose_name="Создан пользователем"
     )
+
+    # ✅ ИСПРАВЛЕНИЕ: Добавляем поля для мягкого удаления
     is_deleted = models.BooleanField(
         default=False,
         verbose_name="Удален",
@@ -207,11 +210,9 @@ class Product(StoreOwnedModel):
         verbose_name="Дата удаления"
     )
 
-    # Переопределяем manager для исключения удаленных
-    objects = StoreOwnedManager()
-
-    # Новый manager для работы с удаленными
-    all_objects = models.Manager()  # Включает удаленные
+    # ✅ ИСПРАВЛЕНИЕ: Переопределяем managers правильно
+    objects = StoreOwnedManager()  # Основной manager (исключает удаленные)
+    all_objects = models.Manager()  # Для работы с удаленными
 
     @classmethod
     def generate_unique_barcode(cls):
@@ -223,16 +224,12 @@ class Product(StoreOwnedModel):
         attempts = 0
 
         while attempts < max_attempts:
-
             timestamp = str(int(time.time()))[-6:]  # 6 последних цифр времени
-
             random_part = str(random.randint(100000, 999999))  # 6 случайных цифр
-
             barcode_code = timestamp + random_part
-
             checksum = cls()._calculate_ean13_checksum(barcode_code)
-
             full_ean = barcode_code + checksum
+
             # Проверяем уникальность в базе
             if not cls.objects.filter(barcode=full_ean).exists():
                 return full_ean
@@ -358,9 +355,10 @@ class Product(StoreOwnedModel):
             models.Index(fields=['name', 'barcode']),
             models.Index(fields=['store', 'name']),
             models.Index(fields=['store', 'barcode']),
-            models.Index(fields=['is_deleted']),  # ← Новый индекс
+            models.Index(fields=['is_deleted']),  # Индекс для мягкого удаления
         ]
         unique_together = ['store', 'barcode']
+
     def soft_delete(self):
         """Мягкое удаление товара"""
         from django.utils import timezone
@@ -378,6 +376,7 @@ class Product(StoreOwnedModel):
         self.is_deleted = False
         self.deleted_at = None
         self.save(update_fields=['is_deleted', 'deleted_at'])
+
 
 class ProductAttribute(models.Model):
     product = models.ForeignKey(
@@ -401,6 +400,7 @@ class ProductAttribute(models.Model):
     def __str__(self):
         return f"{self.product.name} - {self.attribute_value.value}"
 
+
 class SizeChart(models.Model):
     name = models.CharField(max_length=100, unique=True, verbose_name="Название")
     description = models.TextField(blank=True, null=True, verbose_name="Описание")
@@ -413,7 +413,6 @@ class SizeChart(models.Model):
 
     def __str__(self):
         return self.name
-
 
 
 class ProductBatch(StoreOwnedModel):
@@ -434,7 +433,7 @@ class ProductBatch(StoreOwnedModel):
         verbose_name="Цена закупки",
     )
     size = models.ForeignKey(
-        SizeInfo,  # или как у тебя называется модель размера
+        SizeInfo,
         null=True,
         blank=True,
         on_delete=models.SET_NULL,
@@ -468,6 +467,7 @@ class ProductBatch(StoreOwnedModel):
     def __str__(self):
         return f"{self.product.name} × {self.quantity} (поставщик: {self.supplier})"
 
+
 class Stock(StoreOwnedModel):
     product = models.OneToOneField(
         Product,
@@ -482,6 +482,7 @@ class Stock(StoreOwnedModel):
     )
     updated_at = models.DateTimeField(auto_now=True)
     objects = StoreOwnedManager()
+
     class Meta:
         verbose_name = "Остаток на складе"
         verbose_name_plural = "Остатки на складе"
@@ -521,6 +522,8 @@ class Stock(StoreOwnedModel):
     def __str__(self):
         return f"{self.product.name}: {self.quantity} {self.product.get_unit_display()}"
 
+
+# ✅ ИСПРАВЛЕНИЕ: Исправляем сигналы
 @receiver(post_save, sender=Product)
 def create_product_stock(sender, instance, created, **kwargs):
     """
@@ -545,6 +548,7 @@ def create_product_stock(sender, instance, created, **kwargs):
                 logger.error(f"❌ Error creating stock for product {instance.name}: {str(e)}")
         else:
             logger.warning(f"⚠️ Cannot create stock for product {instance.name}: no store assigned")
+
 
 @receiver(post_save, sender=ProductBatch)
 def update_stock_on_batch_change(sender, instance, **kwargs):
