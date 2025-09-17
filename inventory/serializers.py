@@ -320,7 +320,9 @@ class ProductAttributeSerializer(serializers.ModelSerializer):
 class SizeChartSerializer(serializers.ModelSerializer):
     class Meta:
         model = SizeChart
-        fields = ['id', 'name', 'values']
+        fields = ['id', 'name', 'description', 'created_at']
+        read_only_fields = ['created_at']
+
 
 
 class ProductBatchSerializer(serializers.ModelSerializer):
@@ -511,8 +513,20 @@ class ProductSerializer(StoreSerializerMixin, serializers.ModelSerializer):
         available_sizes = validated_data.pop('available_sizes', [])
 
         # Создаем товар
-        product = Product(**validated_data)
+        product = Product.objects.create(**validated_data)
+
+        # обработка размеров
+        default_size = validated_data.get('default_size')
+        available_sizes = validated_data.get('available_sizes')
+
+        if default_size:
+            product.default_size = default_size
+        if available_sizes:
+            product.available_sizes.set(available_sizes)
+
+        product.save()
         return product
+
 
     def update(self, instance, validated_data):
         """Обновление товара с обработкой размеров"""

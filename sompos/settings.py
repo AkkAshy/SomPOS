@@ -74,6 +74,7 @@ INSTALLED_APPS = [
     'corsheaders',
     'django_filters',
     'sms_sender',
+    "rangefilter",
 ]
 
 MIDDLEWARE = [
