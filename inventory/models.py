@@ -19,6 +19,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.fonts import addMapping
 from stores.mixins import StoreOwnedModel, StoreOwnedManager
+from django.utils import timezone
 
 
 pdfmetrics.registerFont(TTFont('DejaVuSans', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'))
@@ -26,81 +27,266 @@ addMapping('DejaVuSans', 0, 0, 'DejaVuSans')
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('inventory')
 
+class SoftDeleteManager(models.Manager):
+    """Менеджер для работы только с активными (не удаленными) объектами"""
+
+    def get_queryset(self):
+        return super().get_queryset().filter(deleted_at__isnull=True)
+
+    def with_deleted(self):
+        """Получить все объекты, включая удаленные"""
+        return super().get_queryset()
+
+    def deleted_only(self):
+        """Получить только удаленные объекты"""
+        return super().get_queryset().filter(deleted_at__isnull=False)
+
+
+class StoreOwnedSoftDeleteManager(SoftDeleteManager):
+    """Комбинированный менеджер для Store-owned моделей с soft delete"""
+
+    def for_store(self, store):
+        return self.get_queryset().filter(store=store)
+
+    def with_deleted_for_store(self, store):
+        return self.with_deleted().filter(store=store)
+
+
+class CustomUnit(StoreOwnedModel):
+    """Пользовательские единицы измерения для магазина"""
+    name = models.CharField(
+        max_length=50, 
+        verbose_name="Полное название",
+        help_text="Например: Дюйм, Галлон, Коробка"
+    )
+    short_name = models.CharField(
+        max_length=10, 
+        verbose_name="Сокращение",
+        help_text="Например: дюйм, гал, кор"
+    )
+    allow_decimal = models.BooleanField(
+        default=False,
+        verbose_name="Разрешить дробные",
+        help_text="Можно ли продавать 1.5 единицы"
+    )
+    min_quantity = models.DecimalField(
+        max_digits=10, 
+        decimal_places=3,
+        default=1,
+        verbose_name="Минимум для продажи"
+    )
+    step = models.DecimalField(
+        max_digits=10,
+        decimal_places=3, 
+        default=1,
+        verbose_name="Шаг изменения",
+        help_text="Например: 0.1, 0.5, 1"
+    )
+    
+    objects = StoreOwnedManager()
+    
+    class Meta:
+        verbose_name = "Единица измерения"
+        verbose_name_plural = "Единицы измерения"
+        unique_together = ['store', 'short_name']
+    
+    def __str__(self):
+        return f"{self.name} ({self.short_name})"
+
+
 
 class SizeInfo(StoreOwnedModel):
-    SIZE_CHOICES = [
-        ('XS', 'XS'),
-        ('S', 'S'),
-        ('M', 'M'),
-        ('L', 'L'),
-        ('XL', 'XL'),
-        ('XXL', 'XXL'),
-        ('XXXL', 'XXXL'),
-        # Можно добавить числовые размеры
-        ('38', '38'),
-        ('40', '40'),
-        ('42', '42'),
-        ('44', '44'),
-        ('46', '46'),
-        ('48', '48'),
-        ('50', '50'),
-        ('52', '52'),
-        ('54', '54'),
-        ('56', '56'),
-    ]
-
-    size = models.CharField(max_length=50, verbose_name="Размер")
-
-    chest = models.PositiveSmallIntegerField(
-        validators=[MinValueValidator(1)],
-        null=True,
-        blank=True,
-        verbose_name="Обхват груди"
+    """
+    Универсальная модель для размерных характеристик
+    Для сантехники: диаметры труб (1/2", 3/4"), размеры фитингов и т.д.
+    """
+    # Убираем SIZE_CHOICES - делаем свободный ввод
+    size = models.CharField(
+        max_length=50, 
+        verbose_name="Размер/Вариант",
+        help_text="Например: 1/2\", 3/4\", 20мм, DN15"
     )
-    waist = models.PositiveSmallIntegerField(
-        validators=[MinValueValidator(1)],
+    
+    # Переименовываем поля для универсальности
+    dimension1 = models.DecimalField(
+        max_digits=10,
+        decimal_places=3,
         null=True,
         blank=True,
-        verbose_name="Обхват талии"
+        verbose_name="Параметр 1",
+        help_text="Например: внутренний диаметр (мм)"
     )
-    length = models.PositiveSmallIntegerField(
-        validators=[MinValueValidator(1)],
+    dimension2 = models.DecimalField(
+        max_digits=10,
+        decimal_places=3,
         null=True,
         blank=True,
-        verbose_name="Длина"
+        verbose_name="Параметр 2", 
+        help_text="Например: внешний диаметр (мм)"
+    )
+    dimension3 = models.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        null=True,
+        blank=True,
+        verbose_name="Параметр 3",
+        help_text="Например: толщина стенки (мм)"
+    )
+    
+    # Метки для параметров
+    dimension1_label = models.CharField(
+        max_length=50,
+        null=True,
+        blank=True,
+        default="Внутр. диаметр",
+        verbose_name="Название параметра 1"
+    )
+    dimension2_label = models.CharField(
+        max_length=50,
+        null=True,
+        blank=True,
+        default="Внешн. диаметр",
+        verbose_name="Название параметра 2"
+    )
+    dimension3_label = models.CharField(
+        max_length=50,
+        null=True,
+        blank=True,
+        default="Толщина стенки",
+        verbose_name="Название параметра 3"
+    )
+    
+    description = models.TextField(
+        blank=True,
+        null=True,
+        verbose_name="Описание"
+    )
+    
+    sort_order = models.IntegerField(
+        default=0,
+        verbose_name="Порядок сортировки"
     )
 
     objects = StoreOwnedManager()
 
     class Meta:
-        verbose_name = "Размерная информация"
-        verbose_name_plural = "Размерные информации"
+        verbose_name = "Размер/Вариант"
+        verbose_name_plural = "Размеры/Варианты"
+        ordering = ['sort_order', 'size']
         constraints = [
+            # ✅ КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Уникальность только для активных записей
             models.UniqueConstraint(
                 fields=['store', 'size'],
-                name='unique_size_per_store'
+                name='unique_active_size_per_store',
+                condition=models.Q(deleted_at__isnull=True)  # Только для не удаленных
             )
         ]
 
     def __str__(self):
         return f"{self.size} ({self.store.name if self.store else 'Без магазина'})"
 
+    @property
+    def full_description(self):
+        """Полное описание с параметрами"""
+        parts = [self.size]
+        
+        if self.dimension1 and self.dimension1_label:
+            parts.append(f"{self.dimension1_label}: {self.dimension1}")
+        if self.dimension2 and self.dimension2_label:
+            parts.append(f"{self.dimension2_label}: {self.dimension2}")
+        if self.dimension3 and self.dimension3_label:
+            parts.append(f"{self.dimension3_label}: {self.dimension3}")
+            
+        return " | ".join(parts)
+
+
+    def __str__(self):
+        status = " (удален)" if self.deleted_at else ""
+        return f"{self.size} ({self.store.name if self.store else 'Без магазина'}){status}"
+
+    def delete(self, using=None, keep_parents=False):
+        """Soft delete - помечаем как удаленный"""
+        self.deleted_at = timezone.now()
+        self.save(using=using)
+
+    def hard_delete(self, using=None, keep_parents=False):
+        """Реальное удаление из БД"""
+        super().delete(using=using, keep_parents=keep_parents)
+
+    def restore(self):
+        """Восстановление удаленного размера"""
+        self.deleted_at = None
+        self.save()
+
+    @property
+    def is_deleted(self):
+        """Проверка, удален ли размер"""
+        return self.deleted_at is not None
+
+
+# class ProductCategory(StoreOwnedModel):
+#     name = models.CharField(max_length=255, verbose_name="Название")
+#     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Дата создания")
+#     objects = StoreOwnedManager()
+
+#     class Meta:
+#         verbose_name = "Категория товара"
+#         verbose_name_plural = "Категории товаров"
+#         ordering = ['name']
+#         constraints = [
+#             models.UniqueConstraint(fields=['store', 'name'], name='unique_category_per_store')
+#         ]
+
+#     def __str__(self):
+#         return self.name
+
+
+
 
 class ProductCategory(StoreOwnedModel):
     name = models.CharField(max_length=255, verbose_name="Название")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Дата создания")
-    objects = StoreOwnedManager()
+    deleted_at = models.DateTimeField(null=True, blank=True, verbose_name="Дата удаления")
+
+    # Менеджеры
+    objects = StoreOwnedSoftDeleteManager()  # По умолчанию показывает только активные
+    all_objects = models.Manager()  # Показывает все, включая удаленные
 
     class Meta:
         verbose_name = "Категория товара"
         verbose_name_plural = "Категории товаров"
         ordering = ['name']
+        # ✅ КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Уникальность только для активных записей
         constraints = [
-            models.UniqueConstraint(fields=['store', 'name'], name='unique_category_per_store')
+            models.UniqueConstraint(
+                fields=['store', 'name'],
+                name='unique_active_category_per_store',
+                condition=models.Q(deleted_at__isnull=True)  # Только для не удаленных
+            )
         ]
 
     def __str__(self):
-        return self.name
+        status = " (удалена)" if self.deleted_at else ""
+        return f"{self.name}{status}"
+
+    def delete(self, using=None, keep_parents=False):
+        """Soft delete - помечаем как удаленную"""
+        self.deleted_at = timezone.now()
+        self.save(using=using)
+
+    def hard_delete(self, using=None, keep_parents=False):
+        """Реальное удаление из БД"""
+        super().delete(using=using, keep_parents=keep_parents)
+
+    def restore(self):
+        """Восстановление удаленной категории"""
+        self.deleted_at = None
+        self.save()
+
+    @property
+    def is_deleted(self):
+        """Проверка, удалена ли категория"""
+        return self.deleted_at is not None
 
 
 class AttributeType(models.Model):
@@ -140,11 +326,29 @@ class AttributeValue(models.Model):
 
 
 class Product(StoreOwnedModel):
-    UNIT_CHOICES = [
-        ('piece', 'Штука')
+    # Системные единицы измерения
+    SYSTEM_UNITS = [
+        ('piece', 'Штука'),
+        ('meter', 'Метр'),
+        ('m2', 'Кв.метр'),
+        ('kg', 'Килограмм'),
+        ('liter', 'Литр'),
+        ('pack', 'Упаковка'),
+        ('set', 'Комплект'),
     ]
+    
+    # Настройки для системных единиц
+    UNIT_SETTINGS = {
+        'piece': {'decimal': False, 'min': 1, 'step': 1},
+        'meter': {'decimal': True, 'min': 0.1, 'step': 0.01},
+        'm2': {'decimal': True, 'min': 0.01, 'step': 0.01},
+        'kg': {'decimal': True, 'min': 0.01, 'step': 0.001},
+        'liter': {'decimal': True, 'min': 0.1, 'step': 0.01},
+        'pack': {'decimal': False, 'min': 1, 'step': 1},
+        'set': {'decimal': False, 'min': 1, 'step': 1},
+    }
+    
     name = models.CharField(max_length=255, verbose_name="Название")
-
     barcode = models.CharField(
         max_length=100,
         unique=True,
@@ -159,36 +363,76 @@ class Product(StoreOwnedModel):
         related_name='products',
         verbose_name="Категория"
     )
-    unit = models.CharField(
-        max_length=50,
-        choices=UNIT_CHOICES,
-        default='piece',
-        verbose_name="Единица измерения"
+    
+    # Единица измерения - системная или пользовательская
+    unit_type = models.CharField(
+        max_length=20,
+        choices=SYSTEM_UNITS,
+        null=True,
+        blank=True,
+        verbose_name="Системная единица"
     )
-    sale_price = models.DecimalField(
+    custom_unit = models.ForeignKey(
+        CustomUnit,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        verbose_name="Пользовательская единица"
+    )
+    
+    # Переопределение настроек единицы
+    override_min_quantity = models.DecimalField(
         max_digits=10,
-        decimal_places=2,
-        default=0.00,
-        validators=[MinValueValidator(0)],
-        verbose_name="Цена продажи"
+        decimal_places=3,
+        null=True,
+        blank=True,
+        verbose_name="Свой минимум продажи"
     )
+    override_step = models.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        null=True,
+        blank=True,
+        verbose_name="Свой шаг"
+    )
+    
+    sale_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        verbose_name="Рекомендованная цена продажи"
+    )
+    
+    # Размеры/варианты товара
+    has_sizes = models.BooleanField(
+        default=False,
+        verbose_name="Имеет размеры/варианты",
+        help_text="Например: трубы разных диаметров"
+    )
+    default_size = models.ForeignKey(
+        SizeInfo, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='products_default',
+        verbose_name="Основной размер"
+    )
+    available_sizes = models.ManyToManyField(
+        SizeInfo,
+        blank=True,
+        related_name='products_available',
+        verbose_name="Доступные размеры"
+    )
+    
+    # Атрибуты товара (материал, производитель и т.д.)
     attributes = models.ManyToManyField(
         AttributeValue,
         blank=True,
         related_name='products',
         verbose_name="Атрибуты"
     )
-    size = models.ForeignKey(SizeInfo, on_delete=models.SET_NULL, null=True, blank=True)
-
+    
+    # Метаданные
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Дата создания")
-
-    image_label = models.ImageField(
-        upload_to='product_labels/',
-        null=True,
-        blank=True,
-        verbose_name="Изображение этикетки"
-    )
-
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -197,8 +441,15 @@ class Product(StoreOwnedModel):
         related_name='products_created',
         verbose_name="Создан пользователем"
     )
-
-    # ✅ ИСПРАВЛЕНИЕ: Добавляем поля для мягкого удаления
+    
+    image_label = models.ImageField(
+        upload_to='product_labels/',
+        null=True,
+        blank=True,
+        verbose_name="Изображение этикетки"
+    )
+    
+    # Мягкое удаление
     is_deleted = models.BooleanField(
         default=False,
         verbose_name="Удален",
@@ -210,143 +461,8 @@ class Product(StoreOwnedModel):
         verbose_name="Дата удаления"
     )
 
-    # ✅ ИСПРАВЛЕНИЕ: Переопределяем managers правильно
-    objects = StoreOwnedManager()  # Основной manager (исключает удаленные)
-    all_objects = models.Manager()  # Для работы с удаленными
-
-    @classmethod
-    def generate_unique_barcode(cls):
-        import uuid
-        import random
-        import time
-        """Генерирует уникальный штрих-код"""
-        max_attempts = 100
-        attempts = 0
-
-        while attempts < max_attempts:
-            timestamp = str(int(time.time()))[-6:]  # 6 последних цифр времени
-            random_part = str(random.randint(100000, 999999))  # 6 случайных цифр
-            barcode_code = timestamp + random_part
-            checksum = cls()._calculate_ean13_checksum(barcode_code)
-            full_ean = barcode_code + checksum
-
-            # Проверяем уникальность в базе
-            if not cls.objects.filter(barcode=full_ean).exists():
-                return full_ean
-            attempts += 1
-
-        data12 = str(uuid.uuid4().int)[:12]
-        return data12 + cls()._calculate_ean13_checksum(data12)
-
-    def _calculate_ean13_checksum(self, digits):
-        """Вычисляет контрольную цифру EAN-13"""
-        weights = [1, 3] * 6
-        total = sum(int(d) * w for d, w in zip(digits, weights))
-        return str((10 - (total % 10)) % 10)
-
-    def _generate_barcode_image(self, barcode_str):
-        """Генерирует изображение штрих-кода (размер 700x200, без текста)"""
-        barcode_str = str(barcode_str).strip().zfill(12)[:12]
-        full_ean = barcode_str + self._calculate_ean13_checksum(barcode_str)
-
-        writer = ImageWriter()
-        writer.set_options({
-            'module_height': 20.0,    # Высота полосок
-            'module_width': 0.4,      # Ширина полосок
-            'quiet_zone': 0.0,        # Без отступов
-            'font_size': 0,           # Отключаем шрифт
-            'write_text': False,      # Явно отключаем текст
-            'text_distance': 0.0,     # Убираем расстояние для текста
-            'dpi': 600,               # Качество изображения
-        })
-
-        ean = barcode.get_barcode_class('ean13')
-        buffer = BytesIO()
-        try:
-            ean(full_ean, writer=writer).write(buffer)
-            buffer.seek(0)
-
-            barcode_img = PILImage.open(buffer)
-
-            # Убираем белые поля и область текста
-            bbox = barcode_img.getbbox()
-            if bbox:
-                width, height = barcode_img.size
-                crop_box = (bbox[0], bbox[1], bbox[2], int(height * 0.7))
-                barcode_img = barcode_img.crop(crop_box)
-
-            # Масштабируем до размера 700x200
-            target_size = (700, 200)
-            barcode_img = barcode_img.resize(target_size, PILImage.Resampling.LANCZOS)
-
-            return barcode_img
-        finally:
-            buffer.close()
-
-    def _create_label_bytes(self, barcode_img):
-        """Создаёт байты изображения"""
-        buffer = BytesIO()
-        barcode_img.save(buffer, format="PNG", quality=95)
-        buffer.seek(0)
-        label_bytes = buffer.getvalue()
-        buffer.close()
-        return label_bytes
-
-    def generate_label(self):
-        """Основной метод генерации этикетки"""
-        if not self.barcode:
-            logger.warning("Штрих-код отсутствует - этикетка не будет создана")
-            return False
-
-        try:
-            barcode_img = self._generate_barcode_image(self.barcode)
-            label_bytes = self._create_label_bytes(barcode_img)
-
-            label_filename = f'product_{self.id}_label.png'
-
-            # Удаляем старый файл, если он существует
-            if self.image_label:
-                self.image_label.delete(save=False)
-
-            # Сохраняем новый файл
-            self.image_label.save(label_filename, ContentFile(label_bytes), save=False)
-            super().save(update_fields=['image_label'])
-            return True
-        except Exception as e:
-            logger.error(f"Ошибка генерации этикетки: {str(e)}", exc_info=True)
-            return False
-
-    def save(self, *args, **kwargs):
-        """Переопределяем save для автогенерации штрихкода и этикетки"""
-        is_new = self._state.adding
-        update_fields = kwargs.get('update_fields')
-
-        # Если обновляем только image_label, просто сохраняем
-        if update_fields and update_fields == ['image_label']:
-            super().save(*args, **kwargs)
-            return
-
-        # Генерируем штрихкод, если его нет
-        if is_new and not self.barcode:
-            self.barcode = self.generate_unique_barcode()
-
-        # Сохраняем объект, чтобы получить self.id
-        super().save(*args, **kwargs)
-
-        # Генерируем этикетку для нового объекта или если штрихкод изменился
-        if is_new or (update_fields and 'barcode' in update_fields):
-            self.generate_label()
-
-    def clean(self):
-        """Валидация перед сохранением"""
-        super().clean()
-        if self.barcode:
-            barcode_str = str(self.barcode).strip()
-            if not barcode_str.isdigit():
-                raise ValidationError({'barcode': "Штрих-код должен содержать только цифры."})
-
-    def __str__(self):
-        return f"{self.name} ({self.get_unit_display()})"
+    objects = StoreOwnedManager()
+    all_objects = models.Manager()
 
     class Meta:
         verbose_name = "Товар"
@@ -355,18 +471,164 @@ class Product(StoreOwnedModel):
             models.Index(fields=['name', 'barcode']),
             models.Index(fields=['store', 'name']),
             models.Index(fields=['store', 'barcode']),
-            models.Index(fields=['is_deleted']),  # Индекс для мягкого удаления
+            models.Index(fields=['is_deleted']),
         ]
         unique_together = ['store', 'barcode']
 
+    def __str__(self):
+        return f"{self.name} ({self.unit_display})"
+
+    def clean(self):
+        """Валидация - должна быть указана единица измерения"""
+        if not self.unit_type and not self.custom_unit:
+            raise ValidationError("Укажите единицу измерения")
+        if self.unit_type and self.custom_unit:
+            raise ValidationError("Выберите либо системную, либо пользовательскую единицу")
+    
+    # === СВОЙСТВА ДЛЯ ЕДИНИЦ ИЗМЕРЕНИЯ ===
+    @property
+    def unit_display(self):
+        """Отображение единицы"""
+        if self.custom_unit:
+            return self.custom_unit.short_name
+        return dict(self.SYSTEM_UNITS).get(self.unit_type, self.unit_type)
+    
+    @property
+    def allow_decimal(self):
+        """Можно ли продавать дробные"""
+        if self.custom_unit:
+            return self.custom_unit.allow_decimal
+        return self.UNIT_SETTINGS.get(self.unit_type, {}).get('decimal', False)
+    
+    @property
+    def min_sale_quantity(self):
+        """Минимальное количество для продажи"""
+        if self.override_min_quantity:
+            return self.override_min_quantity
+        if self.custom_unit:
+            return self.custom_unit.min_quantity
+        return Decimal(str(self.UNIT_SETTINGS.get(self.unit_type, {}).get('min', 1)))
+    
+    @property
+    def quantity_step(self):
+        """Шаг изменения количества"""
+        if self.override_step:
+            return self.override_step
+        if self.custom_unit:
+            return self.custom_unit.step
+        return Decimal(str(self.UNIT_SETTINGS.get(self.unit_type, {}).get('step', 1)))
+    
+    # === СВОЙСТВА ДЛЯ ЦЕН И НАЦЕНОК ===
+    @property
+    def average_purchase_price(self):
+        """Средневзвешенная закупочная цена"""
+        batches = self.batches.filter(
+            quantity__gt=0,
+            purchase_price__isnull=False
+        )
+        if not batches.exists():
+            return None
+            
+        total_cost = Decimal('0')
+        total_quantity = Decimal('0')
+        for batch in batches:
+            total_cost += batch.purchase_price * batch.quantity
+            total_quantity += batch.quantity
+        
+        return total_cost / total_quantity if total_quantity > 0 else None
+    
+    @property
+    def last_purchase_price(self):
+        """Последняя закупочная цена"""
+        last_batch = self.batches.filter(
+            purchase_price__isnull=False
+        ).order_by('-created_at').first()
+        
+        return last_batch.purchase_price if last_batch else None
+    
+    @property
+    def min_purchase_price(self):
+        """Минимальная закупочная цена из активных партий"""
+        min_price = self.batches.filter(
+            quantity__gt=0,
+            purchase_price__isnull=False
+        ).aggregate(min_price=Min('purchase_price'))['min_price']
+        
+        return min_price
+    
+    @property
+    def min_sale_price(self):
+        """Минимальная цена продажи с учетом наценки магазина"""
+        base_price = self.min_purchase_price
+        if not base_price:
+            base_price = self.last_purchase_price
+        
+        if not base_price:
+            return Decimal('0')
+        
+        # Получаем минимальную наценку из магазина
+        if hasattr(self.store, 'min_markup_percent'):
+            multiplier = 1 + (self.store.min_markup_percent / 100)
+            return base_price * Decimal(str(multiplier))
+        
+        return base_price
+    
+    @property
+    def price_info(self):
+        """Информация о ценах для API"""
+        avg_purchase = self.average_purchase_price
+        min_purchase = self.min_purchase_price
+        last_purchase = self.last_purchase_price
+        
+        return {
+            'sale_price': float(self.sale_price),
+            'purchase_prices': {
+                'average': float(avg_purchase) if avg_purchase else None,
+                'minimum': float(min_purchase) if min_purchase else None,
+                'last': float(last_purchase) if last_purchase else None,
+            },
+            'min_sale_price': float(self.min_sale_price),
+            'min_markup_percent': float(self.store.min_markup_percent) if hasattr(self.store, 'min_markup_percent') else 0,
+            'current_margin': self._calculate_margin(self.sale_price, avg_purchase),
+            'batches_count': self.batches.filter(quantity__gt=0).count()
+        }
+    
+    def _calculate_margin(self, sale_price, purchase_price):
+        """Расчет маржи в процентах"""
+        if not purchase_price or purchase_price == 0:
+            return None
+        return float(((sale_price - purchase_price) / purchase_price) * 100)
+    
+    # === МЕТОДЫ ДЛЯ РАЗМЕРОВ ===
+    @property
+    def sizes_info(self):
+        """Информация о размерах товара"""
+        if not self.has_sizes:
+            return None
+            
+        sizes_in_stock = []
+        for batch in self.batches.filter(quantity__gt=0, size__isnull=False):
+            sizes_in_stock.append({
+                'size_id': batch.size.id,
+                'size': batch.size.size,
+                'quantity': float(batch.quantity),
+                'purchase_price': float(batch.purchase_price) if batch.purchase_price else None
+            })
+            
+        return {
+            'has_sizes': True,
+            'default_size': self.default_size.size if self.default_size else None,
+            'available_sizes': list(self.available_sizes.values_list('size', flat=True)),
+            'sizes_in_stock': sizes_in_stock
+        }
+    
+    # === ОСТАЛЬНЫЕ МЕТОДЫ ===
     def soft_delete(self):
         """Мягкое удаление товара"""
-        from django.utils import timezone
         self.is_deleted = True
         self.deleted_at = timezone.now()
         self.save(update_fields=['is_deleted', 'deleted_at'])
-
-        # Также помечаем Stock как неактивный
+        
         if hasattr(self, 'stock'):
             self.stock.quantity = 0
             self.stock.save()
@@ -377,6 +639,44 @@ class Product(StoreOwnedModel):
         self.deleted_at = None
         self.save(update_fields=['is_deleted', 'deleted_at'])
 
+    @classmethod
+    def generate_unique_barcode(cls):
+        """Генерация уникального штрих-кода"""
+        import uuid
+        import random
+        import time
+        
+        max_attempts = 100
+        attempts = 0
+        
+        while attempts < max_attempts:
+            timestamp = str(int(time.time()))[-6:]
+            random_part = str(random.randint(100000, 999999))
+            barcode_code = timestamp + random_part
+            checksum = cls()._calculate_ean13_checksum(barcode_code)
+            full_ean = barcode_code + checksum
+            
+            if not cls.objects.filter(barcode=full_ean).exists():
+                return full_ean
+            attempts += 1
+        
+        data12 = str(uuid.uuid4().int)[:12]
+        return data12 + cls()._calculate_ean13_checksum(data12)
+    
+    def _calculate_ean13_checksum(self, digits):
+        """Вычисляет контрольную цифру EAN-13"""
+        weights = [1, 3] * 6
+        total = sum(int(d) * w for d, w in zip(digits, weights))
+        return str((10 - (total % 10)) % 10)
+
+    def save(self, *args, **kwargs):
+        """Сохранение с автогенерацией штрих-кода"""
+        is_new = self._state.adding
+        
+        if is_new and not self.barcode:
+            self.barcode = self.generate_unique_barcode()
+        
+        super().save(*args, **kwargs)
 
 class ProductAttribute(models.Model):
     product = models.ForeignKey(

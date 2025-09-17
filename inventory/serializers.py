@@ -18,22 +18,123 @@ logger = logging.getLogger('inventory')
 
 
 
+# class ProductCategorySerializer(serializers.ModelSerializer):
+#     class Meta:
+#         model = ProductCategory
+#         fields = ['id', 'name', 'created_at']
+#         read_only_fields = ['created_at']
+#         extra_kwargs = {'name': {'trim_whitespace': True}}
+#         ref_name = 'ProductCategorySerializerInventory'
+
+#     def validate_name(self, value):
+#         value = value.strip()
+
+#         # ✅ ИСПРАВЛЕНИЕ: Проверяем уникальность ТОЛЬКО в рамках текущего магазина
+#         request = self.context.get('request')
+
+#         if not request:
+#             # Если нет контекста запроса, используем глобальную проверку как fallback
+#             if ProductCategory.objects.filter(name__iexact=value).exists():
+#                 raise serializers.ValidationError(
+#                     _("Категория с названием '%(name)s' уже существует") % {'name': value},
+#                     code='duplicate_category'
+#                 )
+#             return value
+
+#         # Получаем текущий магазин из пользователя
+#         current_store = None
+
+#         # Способ 1: Из атрибута пользователя (установлено middleware)
+#         if hasattr(request.user, 'current_store') and request.user.current_store:
+#             current_store = request.user.current_store
+
+#         # Способ 2: Из JWT токена
+#         if not current_store:
+#             auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+#             if auth_header.startswith('Bearer '):
+#                 try:
+#                     from rest_framework_simplejwt.tokens import AccessToken
+#                     token = auth_header.split(' ')[1]
+#                     decoded_token = AccessToken(token)
+#                     store_id = decoded_token.get('store_id')
+
+#                     if store_id:
+#                         from stores.models import Store
+#                         current_store = Store.objects.filter(id=store_id).first()
+#                 except Exception:
+#                     pass
+
+#         # Способ 3: Через StoreEmployee
+#         if not current_store:
+#             from stores.models import StoreEmployee
+#             store_membership = StoreEmployee.objects.filter(
+#                 user=request.user,
+#                 is_active=True
+#             ).select_related('store').first()
+
+#             if store_membership:
+#                 current_store = store_membership.store
+
+#         if not current_store:
+#             raise serializers.ValidationError(
+#                 _("Не удалось определить текущий магазин"),
+#                 code='no_store'
+#             )
+
+#         # ✅ ГЛАВНОЕ ИСПРАВЛЕНИЕ: Проверяем уникальность только в ТЕКУЩЕМ магазине
+#         existing_query = ProductCategory.objects.filter(
+#             store=current_store,  # ← ФИЛЬТР ПО МАГАЗИНУ!
+#             name__iexact=value
+#         )
+
+#         # Если это обновление существующей категории, исключаем её из проверки
+#         if self.instance:
+#             existing_query = existing_query.exclude(pk=self.instance.pk)
+
+#         if existing_query.exists():
+#             raise serializers.ValidationError(
+#                 _("Категория с названием '%(name)s' уже существует в вашем магазине") % {'name': value},
+#                 code='duplicate_category_in_store'
+#             )
+
+#         return value
+
+#     # ✅ ИСПРАВЛЕНИЕ: Убираем кастомный create и используем стандартный
+#     # def create(self, validated_data):
+#     #     """
+#     #     При создании НЕ устанавливаем store здесь - это сделает StoreViewSetMixin.perform_create()
+#     #     """
+#     #     return ProductCategory(**validated_data)
+
+#     def update(self, instance, validated_data):
+#         """
+#         При обновлении проверяем что категория принадлежит текущему магазину
+#         """
+#         request = self.context.get('request')
+#         if request and hasattr(request.user, 'current_store') and request.user.current_store:
+#             if instance.store != request.user.current_store:
+#                 raise serializers.ValidationError(
+#                     _("Вы не можете редактировать категории другого магазина"),
+#                     code='wrong_store'
+#                 )
+
+#         return super().update(instance, validated_data)
+
 class ProductCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductCategory
-        fields = ['id', 'name', 'created_at']
-        read_only_fields = ['created_at']
+        fields = ['id', 'name', 'created_at', 'is_deleted']  # Добавляем is_deleted
+        read_only_fields = ['created_at', 'is_deleted']
         extra_kwargs = {'name': {'trim_whitespace': True}}
         ref_name = 'ProductCategorySerializerInventory'
 
     def validate_name(self, value):
         value = value.strip()
 
-        # ✅ ИСПРАВЛЕНИЕ: Проверяем уникальность ТОЛЬКО в рамках текущего магазина
         request = self.context.get('request')
 
         if not request:
-            # Если нет контекста запроса, используем глобальную проверку как fallback
+            # ✅ ИСПРАВЛЕНИЕ: Проверяем только среди активных категорий
             if ProductCategory.objects.filter(name__iexact=value).exists():
                 raise serializers.ValidationError(
                     _("Категория с названием '%(name)s' уже существует") % {'name': value},
@@ -41,14 +142,12 @@ class ProductCategorySerializer(serializers.ModelSerializer):
                 )
             return value
 
-        # Получаем текущий магазин из пользователя
+        # Получаем текущий магазин (тот же код что был)
         current_store = None
 
-        # Способ 1: Из атрибута пользователя (установлено middleware)
         if hasattr(request.user, 'current_store') and request.user.current_store:
             current_store = request.user.current_store
 
-        # Способ 2: Из JWT токена
         if not current_store:
             auth_header = request.META.get('HTTP_AUTHORIZATION', '')
             if auth_header.startswith('Bearer '):
@@ -64,7 +163,6 @@ class ProductCategorySerializer(serializers.ModelSerializer):
                 except Exception:
                     pass
 
-        # Способ 3: Через StoreEmployee
         if not current_store:
             from stores.models import StoreEmployee
             store_membership = StoreEmployee.objects.filter(
@@ -81,10 +179,11 @@ class ProductCategorySerializer(serializers.ModelSerializer):
                 code='no_store'
             )
 
-        # ✅ ГЛАВНОЕ ИСПРАВЛЕНИЕ: Проверяем уникальность только в ТЕКУЩЕМ магазине
+        # ✅ ГЛАВНОЕ ИСПРАВЛЕНИЕ: Проверяем уникальность только среди АКТИВНЫХ категорий
         existing_query = ProductCategory.objects.filter(
-            store=current_store,  # ← ФИЛЬТР ПО МАГАЗИНУ!
+            store=current_store,
             name__iexact=value
+            # deleted_at__isnull=True уже включено в objects manager
         )
 
         # Если это обновление существующей категории, исключаем её из проверки
@@ -92,24 +191,28 @@ class ProductCategorySerializer(serializers.ModelSerializer):
             existing_query = existing_query.exclude(pk=self.instance.pk)
 
         if existing_query.exists():
-            raise serializers.ValidationError(
-                _("Категория с названием '%(name)s' уже существует в вашем магазине") % {'name': value},
-                code='duplicate_category_in_store'
-            )
+            # Проверяем, есть ли удаленная категория с таким именем
+            deleted_category = ProductCategory.all_objects.filter(
+                store=current_store,
+                name__iexact=value,
+                deleted_at__isnull=False
+            ).first()
+
+            if deleted_category:
+                raise serializers.ValidationError(
+                    _("Категория с названием '%(name)s' была удалена. Восстановите её или выберите другое название") % {'name': value},
+                    code='category_was_deleted'
+                )
+            else:
+                raise serializers.ValidationError(
+                    _("Категория с названием '%(name)s' уже существует в вашем магазине") % {'name': value},
+                    code='duplicate_category_in_store'
+                )
 
         return value
 
-    # ✅ ИСПРАВЛЕНИЕ: Убираем кастомный create и используем стандартный
-    # def create(self, validated_data):
-    #     """
-    #     При создании НЕ устанавливаем store здесь - это сделает StoreViewSetMixin.perform_create()
-    #     """
-    #     return ProductCategory(**validated_data)
-
     def update(self, instance, validated_data):
-        """
-        При обновлении проверяем что категория принадлежит текущему магазину
-        """
+        """При обновлении проверяем что категория принадлежит текущему магазину и не удалена"""
         request = self.context.get('request')
         if request and hasattr(request.user, 'current_store') and request.user.current_store:
             if instance.store != request.user.current_store:
@@ -118,7 +221,14 @@ class ProductCategorySerializer(serializers.ModelSerializer):
                     code='wrong_store'
                 )
 
+            if instance.is_deleted:
+                raise serializers.ValidationError(
+                    _("Нельзя редактировать удаленную категорию"),
+                    code='category_deleted'
+                )
+
         return super().update(instance, validated_data)
+
 
 ############################################################# Атрибуты #############################################################
 class AttributeValueSerializer(serializers.ModelSerializer):
@@ -159,8 +269,8 @@ class SizeInfoSerializer(StoreSerializerMixin, serializers.ModelSerializer):
 
     class Meta:
         model = SizeInfo
-        fields = ['id', 'size', 'chest', 'waist', 'length', 'store_name']
-        read_only_fields = ['id', 'store_name']
+        fields = ['id', 'size', 'chest', 'waist', 'length', 'store_name', 'is_deleted']
+        read_only_fields = ['id', 'store_name', 'is_deleted']
         swagger_schema_fields = {
             'example': {
                 'size': 'XXL',
@@ -185,17 +295,96 @@ class SizeInfoSerializer(StoreSerializerMixin, serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
+        """Комплексная валидация с учетом soft delete"""
         attrs = super().validate(attrs)
-        request = self.context['request']
-        store = getattr(request.user, 'store', None)  # или откуда у тебя магазин берётся
+        request = self.context.get('request')
+
+        if not request:
+            return attrs
+
+        # Получаем текущий магазин (используем ту же логику что в категориях)
+        current_store = None
+
+        if hasattr(request.user, 'current_store') and request.user.current_store:
+            current_store = request.user.current_store
+
+        if not current_store:
+            # Попробуем получить из JWT токена или через StoreEmployee
+            # (тот же код что в категориях)
+            auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+            if auth_header.startswith('Bearer '):
+                try:
+                    from rest_framework_simplejwt.tokens import AccessToken
+                    token = auth_header.split(' ')[1]
+                    decoded_token = AccessToken(token)
+                    store_id = decoded_token.get('store_id')
+
+                    if store_id:
+                        from stores.models import Store
+                        current_store = Store.objects.filter(id=store_id).first()
+                except Exception:
+                    pass
+
+            if not current_store:
+                from stores.models import StoreEmployee
+                store_membership = StoreEmployee.objects.filter(
+                    user=request.user,
+                    is_active=True
+                ).select_related('store').first()
+
+                if store_membership:
+                    current_store = store_membership.store
+
+        if not current_store:
+            raise serializers.ValidationError("Не удалось определить текущий магазин")
+
         size = attrs.get('size')
 
-        if SizeInfo.objects.filter(store=store, size=size).exists():
-            raise serializers.ValidationError(
-                f"Размер '{size}' уже существует в этом магазине"
-            )
+        # ✅ ГЛАВНОЕ ИСПРАВЛЕНИЕ: Проверяем уникальность только среди АКТИВНЫХ размеров
+        existing_query = SizeInfo.objects.filter(
+            store=current_store,
+            size=size
+            # deleted_at__isnull=True уже включено в objects manager
+        )
+
+        # Если это обновление существующего размера, исключаем его из проверки
+        if self.instance:
+            existing_query = existing_query.exclude(pk=self.instance.pk)
+
+        if existing_query.exists():
+            # Проверяем, есть ли удаленный размер с таким именем
+            deleted_size = SizeInfo.all_objects.filter(
+                store=current_store,
+                size=size,
+                deleted_at__isnull=False
+            ).first()
+
+            if deleted_size:
+                raise serializers.ValidationError(
+                    f"Размер '{size}' был удален. Восстановите его или выберите другое название"
+                )
+            else:
+                raise serializers.ValidationError(
+                    f"Размер '{size}' уже существует в этом магазине"
+                )
 
         return attrs
+
+    def update(self, instance, validated_data):
+        """При обновлении проверяем что размер принадлежит текущему магазину и не удален"""
+        request = self.context.get('request')
+        if request and hasattr(request.user, 'current_store') and request.user.current_store:
+            if instance.store != request.user.current_store:
+                raise serializers.ValidationError(
+                    "Вы не можете редактировать размеры другого магазина"
+                )
+
+            if instance.is_deleted:
+                raise serializers.ValidationError(
+                    "Нельзя редактировать удаленный размер"
+                )
+
+        return super().update(instance, validated_data)
 
 
 ############################################################## Продукты #############################################################

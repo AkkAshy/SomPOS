@@ -37,6 +37,22 @@ class Store(models.Model):
         blank=True,
         verbose_name=_("Описание")
     )
+    min_markup_percent = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=10.00,
+        verbose_name="Минимальная наценка %",
+        help_text="Минимальный процент наценки на закупочную цену (например: 10%)"
+    )
+    allow_sale_below_markup = models.BooleanField(
+        default=False,
+        verbose_name="Разрешить продажу ниже минимальной наценки",
+        help_text="Только для админов/владельцев"
+    )
+    @property
+    def min_markup_multiplier(self):
+        """Коэффициент для расчета минимальной цены"""
+        return 1 + (self.min_markup_percent / 100)
 
     # Владелец магазина (админ, который создал)
     owner = models.ForeignKey(
