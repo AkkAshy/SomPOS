@@ -145,7 +145,7 @@ class TransactionSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         """
-        ОБНОВЛЕННАЯ валидация с автоматическим расчетом цены из БД
+        ОБНОВЛЕННАЯ валидация с проверкой минимальной наценки
         """
         items = data.get('items', [])
         customer = data.get('customer')
@@ -162,53 +162,45 @@ class TransactionSerializer(serializers.ModelSerializer):
                 "error": _("Для оплаты в долг требуется customer_id или new_customer")
             })
 
-        if new_customer:
-            if not new_customer.get('full_name') or not new_customer.get('phone'):
-                raise serializers.ValidationError({
-                    "new_customer": _("Поля full_name и phone обязательны")
-                })
+        # Получаем пользователя для проверки роли
+        request = self.context.get('request')
+        user_role = getattr(request.user, 'store_role', 'cashier') if request else 'cashier'
 
         # Получаем текущий магазин
-        request = self.context.get('request')
         current_store = None
-
         if request and hasattr(request.user, 'current_store'):
             current_store = request.user.current_store
-        else:
-            # Пытаемся получить из JWT
-            from rest_framework_simplejwt.tokens import AccessToken
-            auth_header = request.META.get('HTTP_AUTHORIZATION', '')
-            if auth_header.startswith('Bearer '):
-                try:
-                    token = auth_header.split(' ')[1]
-                    decoded_token = AccessToken(token)
-                    store_id = decoded_token.get('store_id')
-                    if store_id:
-                        from stores.models import Store
-                        current_store = Store.objects.filter(id=store_id).first()
-                except:
-                    current_store = None
 
-        # Рассчитываем сумму ТОЛЬКО из цен в БД
+        # Рассчитываем сумму с проверкой минимальной цены
         total_amount = Decimal('0')
         validated_items = []
+        pricing_errors = []
         
         for item_data in items:
             product = item_data['product']
             quantity = Decimal(str(item_data['quantity']))
+            
+            # Получаем цену из запроса или используем цену товара
+            proposed_price = item_data.get('price')
+            if proposed_price:
+                proposed_price = Decimal(str(proposed_price))
+            else:
+                proposed_price = product.sale_price
 
-            # Удаляем цену если вдруг пришла с фронта
-            item_data.pop('price', None)
-
-            # Берем актуальную цену из базы данных
-            actual_price = product.sale_price
-
-            if actual_price <= 0:
-                raise serializers.ValidationError({
-                    "items": _(f"У товара {product.name} некорректная цена в базе данных: {actual_price}")
+            # ✨ НОВАЯ ПРОВЕРКА: Валидация минимальной цены
+            price_validation = product.validate_sale_price(proposed_price, user_role)
+            
+            if not price_validation['valid']:
+                pricing_errors.append({
+                    'product': product.name,
+                    'error': price_validation['error'],
+                    'proposed_price': float(proposed_price),
+                    'min_price': price_validation.get('min_price'),
+                    'min_markup_percent': price_validation.get('min_markup_percent')
                 })
-
-            logger.info(f"Using price from DB for {product.name}: {actual_price}")
+                continue
+            elif 'warning' in price_validation:
+                logger.warning(f"Price below markup allowed for admin: {product.name}, price: {proposed_price}")
 
             # Проверяем принадлежность к магазину
             if current_store and hasattr(product, 'store'):
@@ -223,13 +215,12 @@ class TransactionSerializer(serializers.ModelSerializer):
                     "items": _(f"У товара {product.name} нет информации о складе")
                 })
 
-            # Конвертируем quantity в float для проверки Stock
             quantity_float = float(quantity)
             if product.stock.quantity < quantity_float:
                 raise serializers.ValidationError({
                     "items": _(f"Недостаточно товара {product.name} на складе. "
-                             f"Доступно: {product.stock.quantity} {product.unit_display}, "
-                             f"запрошено: {quantity} {product.unit_display}")
+                            f"Доступно: {product.stock.quantity} {product.unit_display}, "
+                            f"запрошено: {quantity} {product.unit_display}")
                 })
 
             # Валидируем количество согласно настройкам товара
@@ -237,36 +228,30 @@ class TransactionSerializer(serializers.ModelSerializer):
             if quantity < min_quantity:
                 raise serializers.ValidationError({
                     "items": _(f"Количество {quantity} {product.unit_display} товара {product.name} "
-                             f"меньше минимального: {min_quantity} {product.unit_display}")
+                            f"меньше минимального: {min_quantity} {product.unit_display}")
                 })
 
-            if not product.allow_decimal and quantity % 1 != 0:
-                raise serializers.ValidationError({
-                    "items": _(f"Товар {product.name} не поддерживает дробные количества")
-                })
-
-            step = product.quantity_step
-            if step and step > 0:
-                remainder = quantity % step
-                if remainder > Decimal('0.001'):
-                    raise serializers.ValidationError({
-                        "items": _(f"Количество {quantity} товара {product.name} не соответствует шагу {step}")
-                    })
-
-            # Считаем общую сумму ТОЛЬКО с ценой из БД
-            item_total = actual_price * quantity
+            # Считаем общую сумму с ВАЛИДИРОВАННОЙ ценой
+            item_total = proposed_price * quantity
             total_amount += item_total
             
             validated_items.append({
                 'product': product,
                 'quantity': quantity,
-                'price': actual_price,
+                'price': proposed_price,  # Используем валидированную цену
                 'subtotal': item_total
+            })
+
+        # Проверяем ошибки ценообразования
+        if pricing_errors:
+            raise serializers.ValidationError({
+                "pricing_errors": pricing_errors,
+                "message": "Некоторые товары имеют цену ниже минимальной наценки"
             })
 
         data['total_amount'] = total_amount
         data['validated_items'] = validated_items
-        logger.info(f"Total amount calculated from DB prices: {total_amount}")
+        logger.info(f"Total amount calculated with markup validation: {total_amount}")
         return data
 
     def create(self, validated_data):

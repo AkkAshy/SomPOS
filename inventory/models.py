@@ -24,7 +24,9 @@ from decimal import Decimal
 
 
 
-pdfmetrics.registerFont(TTFont('DejaVuSans', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'))
+pdfmetrics.registerFont(
+    TTFont("DejaVuSans", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf")
+)
 addMapping('DejaVuSans', 0, 0, 'DejaVuSans')
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('inventory')
@@ -170,6 +172,8 @@ class SizeInfo(StoreOwnedModel):
     )
 
     objects = StoreOwnedManager()
+    
+    deleted_at = models.DateTimeField(null=True, blank=True, verbose_name="Дата удаления")
 
     class Meta:
         verbose_name = "Размер/Вариант"
@@ -600,6 +604,27 @@ class Product(StoreOwnedModel):
         if not purchase_price or purchase_price == 0:
             return None
         return float(((sale_price - purchase_price) / purchase_price) * 100)
+    
+    def validate_sale_price(self, proposed_price, user_role=None):
+        """Валидация цены продажи с учетом минимальной наценки"""
+        min_price = self.min_sale_price
+        
+        if proposed_price < min_price:
+            # Проверяем права пользователя
+            if user_role in ['owner', 'admin'] and self.store.allow_sale_below_markup:
+                return {
+                    'valid': True,
+                    'warning': f'Цена ниже минимальной наценки ({min_price}), но разрешена для администраторов'
+                }
+            else:
+                return {
+                    'valid': False,
+                    'error': f'Цена не может быть ниже {min_price} (минимальная наценка {self.store.min_markup_percent}%)',
+                    'min_price': float(min_price),
+                    'min_markup_percent': float(self.store.min_markup_percent)
+                }
+        
+        return {'valid': True}
     
     # === МЕТОДЫ ДЛЯ РАЗМЕРОВ ===
     @property

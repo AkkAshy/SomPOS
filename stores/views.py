@@ -19,6 +19,12 @@ from .serializers import (
 from .tokens import get_tokens_for_user_and_store
 from users.serializers import UserSerializer
 
+from inventory.models import Product
+from customers.models import Customer
+
+from sales.models import Transaction
+
+
 logger = logging.getLogger(__name__)
 
 # ✅ ДОБАВЛЯЕМ простые функции
@@ -543,6 +549,148 @@ class StoreViewSet(viewsets.ModelViewSet):
             user=self.request.user,
             role='owner'
         )
+
+    @action(detail=True, methods=['get', 'post'])
+    def markup_settings(self, request, pk=None):
+        """
+        Получить или обновить настройки наценки магазина
+        """
+        store = self.get_object()
+        
+        # Проверяем права (только owner/admin)
+        user_role = getattr(request.user, 'store_role', 'cashier')
+        if user_role not in ['owner', 'admin']:
+            return Response({
+                'error': 'Недостаточно прав для изменения настроек наценки'
+            }, status=403)
+
+        if request.method == 'GET':
+            # Возвращаем текущие настройки
+            return Response({
+                'store_id': str(store.id),
+                'store_name': store.name,
+                'min_markup_percent': float(store.min_markup_percent),
+                'allow_sale_below_markup': store.allow_sale_below_markup,
+                'products_count': Product.objects.filter(store=store).count()
+            })
+
+        elif request.method == 'POST':
+            # Обновляем настройки
+            min_markup_percent = request.data.get('min_markup_percent')
+            allow_sale_below_markup = request.data.get('allow_sale_below_markup')
+
+            if min_markup_percent is not None:
+                try:
+                    min_markup_percent = Decimal(str(min_markup_percent))
+                    if min_markup_percent < 0 or min_markup_percent > 1000:
+                        return Response({
+                            'error': 'Наценка должна быть от 0% до 1000%'
+                        }, status=400)
+                    store.min_markup_percent = min_markup_percent
+                except (ValueError, TypeError):
+                    return Response({
+                        'error': 'Некорректный формат наценки'
+                    }, status=400)
+
+            if allow_sale_below_markup is not None:
+                if not isinstance(allow_sale_below_markup, bool):
+                    return Response({
+                        'error': 'allow_sale_below_markup должно быть true или false'
+                    }, status=400)
+                store.allow_sale_below_markup = allow_sale_below_markup
+
+            store.save()
+
+            logger.info(f"Markup settings updated for store {store.name} by {request.user.username}")
+
+            return Response({
+                'message': 'Настройки наценки обновлены',
+                'store_id': str(store.id),
+                'store_name': store.name,
+                'min_markup_percent': float(store.min_markup_percent),
+                'allow_sale_below_markup': store.allow_sale_below_markup
+            })
+
+    @action(detail=True, methods=['get'])
+    def pricing_report(self, request, pk=None):
+        """
+        Отчет по ценообразованию в магазине
+        """
+        store = self.get_object()
+        
+        products = Product.objects.filter(store=store).select_related('store')
+        
+        # Анализ товаров
+        pricing_analysis = []
+        below_markup_count = 0
+        no_purchase_price_count = 0
+        
+        for product in products:
+            avg_purchase = product.average_purchase_price
+            min_sale_price = product.min_sale_price
+            
+            if not avg_purchase:
+                no_purchase_price_count += 1
+                continue
+                
+            current_margin = ((product.sale_price - avg_purchase) / avg_purchase) * 100
+            
+            analysis = {
+                'product_id': product.id,
+                'product_name': product.name,
+                'sale_price': float(product.sale_price),
+                'min_sale_price': float(min_sale_price),
+                'avg_purchase_price': float(avg_purchase),
+                'current_margin': round(current_margin, 2),
+                'meets_min_markup': current_margin >= float(store.min_markup_percent),
+                'unit_display': product.unit_display
+            }
+            
+            if not analysis['meets_min_markup']:
+                below_markup_count += 1
+                
+            pricing_analysis.append(analysis)
+        
+        # Сортируем по марже (от меньшей к большей)
+        pricing_analysis.sort(key=lambda x: x['current_margin'])
+        
+        # Статистика
+        margins = [p['current_margin'] for p in pricing_analysis]
+        
+        summary = {
+            'store_info': {
+                'id': str(store.id),
+                'name': store.name,
+                'min_markup_percent': float(store.min_markup_percent),
+                'allow_sale_below_markup': store.allow_sale_below_markup
+            },
+            'statistics': {
+                'total_products': products.count(),
+                'analyzed_products': len(pricing_analysis),
+                'products_below_markup': below_markup_count,
+                'products_without_purchase_price': no_purchase_price_count,
+                'avg_margin': round(sum(margins) / len(margins), 2) if margins else 0,
+                'min_margin': min(margins) if margins else 0,
+                'max_margin': max(margins) if margins else 0
+            },
+            'products_below_markup': [p for p in pricing_analysis if not p['meets_min_markup']][:20],
+            'recommendations': []
+        }
+        
+        # Рекомендации
+        if below_markup_count > 0:
+            summary['recommendations'].append({
+                'type': 'warning',
+                'message': f'{below_markup_count} товаров продаются ниже минимальной наценки {store.min_markup_percent}%'
+            })
+        
+        if no_purchase_price_count > 0:
+            summary['recommendations'].append({
+                'type': 'info',
+                'message': f'{no_purchase_price_count} товаров не имеют закупочной цены'
+            })
+        
+        return Response(summary)
 
 
 class CreateUserForStoreView(APIView):

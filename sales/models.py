@@ -6,6 +6,7 @@ from inventory.models import Product, Stock
 import logging
 from stores.mixins import StoreOwnedModel, StoreOwnedManager
 from decimal import Decimal
+from django.utils import timezone
 
 logger = logging.getLogger('sales')
 
