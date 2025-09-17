@@ -1,3 +1,4 @@
+# analytics/signals.py - ОБНОВЛЕННАЯ ВЕРСИЯ
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.db import transaction
@@ -5,7 +6,10 @@ from django.db.models import Sum, F
 from django.core.cache import cache
 from django.utils import timezone
 from sales.models import Transaction
-from analytics.models import SalesSummary, ProductAnalytics, CustomerAnalytics
+from analytics.models import (
+    SalesSummary, ProductAnalytics, CustomerAnalytics,
+    UnitAnalytics, SizeAnalytics, CategoryAnalytics
+)
 import logging
 from decimal import Decimal
 
@@ -14,8 +18,7 @@ logger = logging.getLogger('analytics')
 @receiver(post_save, sender=Transaction)
 def process_transaction_analytics(sender, instance, created, **kwargs):
     """
-    ✅ ЕДИНСТВЕННЫЙ сигнал для обработки аналитики
-    Использует блокировки и проверки для предотвращения дублирования
+    ✅ ОБНОВЛЕННЫЙ сигнал для обработки аналитики с поддержкой новых единиц измерения и размеров
     """
 
     # Обрабатываем только завершённые транзакции
@@ -45,6 +48,9 @@ def process_transaction_analytics(sender, instance, created, **kwargs):
             # Обрабатываем все виды аналитики
             _process_sales_summary(instance)
             _process_product_analytics(instance)
+            _process_unit_analytics(instance)  # ← НОВОЕ
+            _process_size_analytics(instance)  # ← НОВОЕ
+            _process_category_analytics(instance)  # ← НОВОЕ
 
             if instance.customer:
                 _process_customer_analytics(instance)
@@ -119,7 +125,7 @@ def _process_sales_summary(instance):
 
 def _process_product_analytics(instance):
     """
-    Обрабатывает аналитику по товарам
+    ОБНОВЛЕННАЯ обработка аналитики по товарам с учетом дробных единиц
     """
     date = instance.created_at.date()
 
@@ -131,6 +137,11 @@ def _process_product_analytics(instance):
                 date=date
             ).first()
 
+            # Конвертируем количество в Decimal для точности
+            item_quantity = Decimal(str(item.quantity))
+            item_price = Decimal(str(item.price))
+            item_revenue = item_quantity * item_price
+
             if analytics:
                 # Проверяем дублирование
                 if _is_item_already_included_in_product_analytics(item, analytics, date):
@@ -138,12 +149,17 @@ def _process_product_analytics(instance):
                     continue
 
                 # Добавляем к существующей записи
-                analytics.quantity_sold += item.quantity
-                analytics.revenue += item.quantity * item.price
+                analytics.quantity_sold += item_quantity
+                analytics.revenue += item_revenue
                 analytics.cashier = instance.cashier
+                
+                # Пересчитываем среднюю цену
+                if analytics.quantity_sold > 0:
+                    analytics.average_unit_price = analytics.revenue / analytics.quantity_sold
+                
                 analytics.save()
 
-                logger.debug(f"Updated ProductAnalytics for {item.product.name}: +{item.quantity}")
+                logger.debug(f"Updated ProductAnalytics for {item.product.name}: +{item_quantity} {item.product.unit_display}")
 
             else:
                 # Создаем новую запись
@@ -151,15 +167,227 @@ def _process_product_analytics(instance):
                     product=item.product,
                     date=date,
                     cashier=instance.cashier,
-                    quantity_sold=item.quantity,
-                    revenue=item.quantity * item.price
+                    quantity_sold=item_quantity,
+                    revenue=item_revenue,
+                    average_unit_price=item_price
                 )
 
-                logger.debug(f"Created ProductAnalytics for {item.product.name}: {item.quantity}")
+                logger.debug(f"Created ProductAnalytics for {item.product.name}: {item_quantity} {item.product.unit_display}")
 
     except Exception as e:
         logger.error(f"Error processing product analytics for transaction {instance.id}: {str(e)}")
         raise
+
+
+def _process_unit_analytics(instance):
+    """
+    НОВАЯ функция: Обработка аналитики по единицам измерения
+    """
+    date = instance.created_at.date()
+
+    try:
+        # Группируем товары по единицам измерения
+        unit_groups = {}
+        
+        for item in instance.items.all():
+            product = item.product
+            unit_key = (product.unit_type or 'custom', product.unit_display)
+            
+            if unit_key not in unit_groups:
+                unit_groups[unit_key] = {
+                    'unit_type': product.unit_type or 'custom',
+                    'unit_display': product.unit_display,
+                    'is_custom': product.custom_unit is not None,
+                    'quantity': Decimal('0'),
+                    'revenue': Decimal('0'),
+                    'products': set(),
+                    'transactions': 1
+                }
+            
+            item_quantity = Decimal(str(item.quantity))
+            item_revenue = item_quantity * Decimal(str(item.price))
+            
+            unit_groups[unit_key]['quantity'] += item_quantity
+            unit_groups[unit_key]['revenue'] += item_revenue
+            unit_groups[unit_key]['products'].add(product.id)
+
+        # Обрабатываем каждую единицу измерения
+        for unit_key, unit_data in unit_groups.items():
+            unit_type = unit_data['unit_type']
+            unit_display = unit_data['unit_display']
+            
+            # Ищем или создаем запись аналитики
+            analytics, created = UnitAnalytics.objects.get_or_create(
+                store=instance.store,
+                date=date,
+                unit_type=unit_type,
+                unit_display=unit_display,
+                defaults={
+                    'is_custom': unit_data['is_custom'],
+                    'total_quantity_sold': unit_data['quantity'],
+                    'total_revenue': unit_data['revenue'],
+                    'products_count': len(unit_data['products']),
+                    'transactions_count': 1
+                }
+            )
+            
+            if not created:
+                analytics.total_quantity_sold += unit_data['quantity']
+                analytics.total_revenue += unit_data['revenue']
+                analytics.products_count = len(set(list(analytics.products_count) + list(unit_data['products'])))
+                analytics.transactions_count += 1
+                analytics.save()
+
+            # Рассчитываем метрики
+            analytics.calculate_metrics()
+            analytics.save()
+
+            logger.debug(f"Processed UnitAnalytics for {unit_display}: +{unit_data['quantity']}")
+
+    except Exception as e:
+        logger.error(f"Error processing unit analytics for transaction {instance.id}: {str(e)}")
+        # Не поднимаем исключение, так как это дополнительная аналитика
+
+
+def _process_size_analytics(instance):
+    """
+    НОВАЯ функция: Обработка аналитики по размерам
+    """
+    date = instance.created_at.date()
+
+    try:
+        # Группируем товары по размерам
+        size_groups = {}
+        
+        for item in instance.items.all():
+            product = item.product
+            
+            # Пропускаем товары без размеров
+            if not product.has_sizes or not product.default_size:
+                continue
+                
+            size_info = product.default_size
+            size_key = size_info.size
+            
+            if size_key not in size_groups:
+                size_groups[size_key] = {
+                    'size_name': size_info.size,
+                    'dimension1': size_info.dimension1,
+                    'dimension2': size_info.dimension2,
+                    'dimension3': size_info.dimension3,
+                    'dimension1_label': size_info.dimension1_label,
+                    'dimension2_label': size_info.dimension2_label,
+                    'dimension3_label': size_info.dimension3_label,
+                    'quantity': Decimal('0'),
+                    'revenue': Decimal('0'),
+                    'products': set(),
+                    'transactions': 1
+                }
+            
+            item_quantity = Decimal(str(item.quantity))
+            item_revenue = item_quantity * Decimal(str(item.price))
+            
+            size_groups[size_key]['quantity'] += item_quantity
+            size_groups[size_key]['revenue'] += item_revenue
+            size_groups[size_key]['products'].add(product.id)
+
+        # Обрабатываем каждый размер
+        for size_key, size_data in size_groups.items():
+            # Ищем или создаем запись аналитики
+            analytics, created = SizeAnalytics.objects.get_or_create(
+                store=instance.store,
+                date=date,
+                size_name=size_data['size_name'],
+                defaults={
+                    'dimension1': size_data['dimension1'],
+                    'dimension2': size_data['dimension2'],
+                    'dimension3': size_data['dimension3'],
+                    'dimension1_label': size_data['dimension1_label'],
+                    'dimension2_label': size_data['dimension2_label'],
+                    'dimension3_label': size_data['dimension3_label'],
+                    'total_quantity_sold': size_data['quantity'],
+                    'total_revenue': size_data['revenue'],
+                    'products_count': len(size_data['products']),
+                    'transactions_count': 1
+                }
+            )
+            
+            if not created:
+                analytics.total_quantity_sold += size_data['quantity']
+                analytics.total_revenue += size_data['revenue']
+                analytics.transactions_count += 1
+                analytics.save()
+
+            logger.debug(f"Processed SizeAnalytics for {size_key}: +{size_data['quantity']}")
+
+    except Exception as e:
+        logger.error(f"Error processing size analytics for transaction {instance.id}: {str(e)}")
+        # Не поднимаем исключение, так как это дополнительная аналитика
+
+
+def _process_category_analytics(instance):
+    """
+    НОВАЯ функция: Обработка аналитики по категориям
+    """
+    date = instance.created_at.date()
+
+    try:
+        # Группируем товары по категориям
+        category_groups = {}
+        
+        for item in instance.items.all():
+            product = item.product
+            category = product.category
+            category_id = category.id
+            
+            if category_id not in category_groups:
+                category_groups[category_id] = {
+                    'category': category,
+                    'quantity': Decimal('0'),
+                    'revenue': Decimal('0'),
+                    'products': set(),
+                    'transactions': 1
+                }
+            
+            item_quantity = Decimal(str(item.quantity))
+            item_revenue = item_quantity * Decimal(str(item.price))
+            
+            category_groups[category_id]['quantity'] += item_quantity
+            category_groups[category_id]['revenue'] += item_revenue
+            category_groups[category_id]['products'].add(product.id)
+
+        # Обрабатываем каждую категорию
+        for category_id, category_data in category_groups.items():
+            # Ищем или создаем запись аналитики
+            analytics, created = CategoryAnalytics.objects.get_or_create(
+                store=instance.store,
+                date=date,
+                category=category_data['category'],
+                defaults={
+                    'total_quantity_sold': category_data['quantity'],
+                    'total_revenue': category_data['revenue'],
+                    'products_count': len(category_data['products']),
+                    'transactions_count': 1,
+                    'unique_products_sold': len(category_data['products'])
+                }
+            )
+            
+            if not created:
+                analytics.total_quantity_sold += category_data['quantity']
+                analytics.total_revenue += category_data['revenue']
+                analytics.transactions_count += 1
+                # Обновляем уникальные товары (это требует отдельного подсчета)
+                analytics.save()
+
+            # Рассчитываем метрики
+            analytics.calculate_metrics()
+            analytics.save()
+
+            logger.debug(f"Processed CategoryAnalytics for {category_data['category'].name}: +{category_data['revenue']}")
+
+    except Exception as e:
+        logger.error(f"Error processing category analytics for transaction {instance.id}: {str(e)}")
+        # Не поднимаем исключение, так как это дополнительная аналитика
 
 
 def _process_customer_analytics(instance):
@@ -209,6 +437,7 @@ def _process_customer_analytics(instance):
         raise
 
 
+# Остальные вспомогательные функции остаются без изменений
 def _is_transaction_already_included_in_summary(instance, summary):
     """
     Проверяет, включена ли уже транзакция в сводку
@@ -259,10 +488,10 @@ def _is_item_already_included_in_product_analytics(item, analytics, date):
         )['total'] or 0
 
         # Текущее количество минус этот товар
-        current_minus_this = analytics.quantity_sold - item.quantity
+        current_minus_this = analytics.quantity_sold - Decimal(str(item.quantity))
 
         # Если количества совпадают, товар уже учтен
-        return current_minus_this == expected_quantity
+        return abs(current_minus_this - Decimal(str(expected_quantity))) < Decimal('0.001')
 
     except Exception as e:
         logger.error(f"Error checking item inclusion: {str(e)}")

@@ -5,7 +5,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.viewsets import ModelViewSet
 from django.db import transaction, models
-from django.db.models import Q, Sum, Prefetch
+from django.db.models import Q, Sum, Prefetch, F
 from django.utils.translation import gettext_lazy as _
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet, NumberFilter, CharFilter
 from rest_framework.filters import SearchFilter, OrderingFilter
@@ -17,6 +17,8 @@ from django.core.exceptions import ValidationError
 from rest_framework import pagination
 from .pagination import OptionalPagination
 from stores.mixins import StoreViewSetMixin, StoreSerializerMixin, StorePermissionMixin
+from decimal import Decimal
+
 
 
 from customers.views import FlexiblePagination
@@ -24,16 +26,17 @@ from customers.views import FlexiblePagination
 from .models import (
     Product, ProductCategory, Stock, ProductBatch,
     AttributeType, AttributeValue, ProductAttribute,
-    SizeChart, SizeInfo
+    SizeChart, SizeInfo, CustomUnit
 )
 from .serializers import (
     ProductSerializer, ProductCategorySerializer, StockSerializer,
     ProductBatchSerializer, AttributeTypeSerializer, AttributeValueSerializer,
     ProductAttributeSerializer, SizeChartSerializer, SizeInfoSerializer,
-    ProductMultiSizeCreateSerializer
+    ProductMultiSizeCreateSerializer, CustomUnitSerializer
 )
 
 from .filters import ProductFilter, ProductBatchFilter, StockFilter, SizeInfoFilter
+from .pagination import CustomLimitOffsetPagination
 # в одном из ваших приложений views.py
 from django.http import HttpResponse, Http404
 from django.conf import settings
@@ -53,6 +56,94 @@ def serve_media(request, path):
 
 
 logger = logging.getLogger('inventory')
+
+class CustomUnitViewSet(StoreViewSetMixin, ModelViewSet):
+    """
+    ViewSet для управления пользовательскими единицами измерения
+    """
+    serializer_class = CustomUnitSerializer
+    pagination_class = CustomLimitOffsetPagination
+    filter_backends = [SearchFilter, OrderingFilter]
+    search_fields = ['name', 'short_name']
+    ordering_fields = ['name', 'short_name']
+    ordering = ['name']
+
+    def get_queryset(self):
+        """Возвращает единицы только для текущего магазина"""
+        current_store = self.get_current_store()
+        if current_store:
+            return CustomUnit.objects.filter(store=current_store)
+        return CustomUnit.objects.none()
+
+    @swagger_auto_schema(
+        operation_description="Создать новую пользовательскую единицу измерения",
+        request_body=CustomUnitSerializer,
+        responses={201: CustomUnitSerializer}
+    )
+    def create(self, request, *args, **kwargs):
+        return super().create(request, *args, **kwargs)
+
+    @action(detail=False, methods=['get'])
+    def presets(self, request):
+        """
+        Получить предустановленные шаблоны единиц измерения
+        """
+        presets = [
+            {
+                'name': 'Метр погонный',
+                'short_name': 'м.п.',
+                'allow_decimal': True,
+                'min_quantity': 0.1,
+                'step': 0.01,
+                'description': 'Для кабелей, труб, профилей'
+            },
+            {
+                'name': 'Квадратный метр',
+                'short_name': 'кв.м',
+                'allow_decimal': True,
+                'min_quantity': 0.01,
+                'step': 0.01,
+                'description': 'Для плитки, обоев, листовых материалов'
+            },
+            {
+                'name': 'Кубический метр',
+                'short_name': 'куб.м',
+                'allow_decimal': True,
+                'min_quantity': 0.001,
+                'step': 0.001,
+                'description': 'Для сыпучих материалов, бетона'
+            },
+            {
+                'name': 'Тонна',
+                'short_name': 'тн',
+                'allow_decimal': True,
+                'min_quantity': 0.001,
+                'step': 0.001,
+                'description': 'Для тяжелых материалов'
+            },
+            {
+                'name': 'Рулон',
+                'short_name': 'рул',
+                'allow_decimal': False,
+                'min_quantity': 1,
+                'step': 1,
+                'description': 'Для рулонных материалов'
+            },
+            {
+                'name': 'Лист',
+                'short_name': 'лист',
+                'allow_decimal': False,
+                'min_quantity': 1,
+                'step': 1,
+                'description': 'Для листовых материалов'
+            }
+        ]
+
+        return Response({
+            'presets': presets,
+            'message': 'Рекомендуемые единицы измерения для стройматериалов'
+        })
+
 
 class SizeInfoPagination(LimitOffsetPagination):
     """
@@ -758,6 +849,252 @@ class ProductViewSet(
             'count': sizes.count(),
             'message': _('Доступные размеры для товаров')
         })
+
+    @action(detail=False, methods=['get'])
+    def units_info(self, request):
+        """
+        Получить информацию о доступных единицах измерения
+        """
+        current_store = self.get_current_store()
+        if not current_store:
+            return Response({'error': 'Магазин не определен'}, status=400)
+
+        # Системные единицы
+        system_units = [
+            {
+                'value': choice[0],
+                'label': choice[1],
+                'settings': Product.UNIT_SETTINGS.get(choice[0], {})
+            }
+            for choice in Product.SYSTEM_UNITS
+        ]
+
+        # Пользовательские единицы
+        custom_units = CustomUnit.objects.filter(store=current_store)
+        custom_units_data = [
+            {
+                'id': unit.id,
+                'name': unit.name,
+                'short_name': unit.short_name,
+                'allow_decimal': unit.allow_decimal,
+                'min_quantity': float(unit.min_quantity),
+                'step': float(unit.step)
+            }
+            for unit in custom_units
+        ]
+
+        return Response({
+            'system_units': system_units,
+            'custom_units': custom_units_data,
+            'store': {
+                'id': str(current_store.id),
+                'name': current_store.name
+            }
+        })
+
+    @action(detail=False, methods=['get'])
+    def pricing_analysis(self, request):
+        """
+        Анализ ценообразования товаров
+        """
+        current_store = self.get_current_store()
+        if not current_store:
+            return Response({'error': 'Магазин не определен'}, status=400)
+
+        from django.db.models import Avg, Min, Max, Count
+
+        # Анализ по всем товарам
+        products = Product.objects.filter(store=current_store)
+        
+        pricing_stats = []
+        
+        for product in products:
+            avg_purchase = product.average_purchase_price
+            last_purchase = product.last_purchase_price
+            min_purchase = product.min_purchase_price
+            
+            if avg_purchase and avg_purchase > 0:
+                margin = ((product.sale_price - avg_purchase) / avg_purchase) * 100
+                
+                pricing_stats.append({
+                    'product_id': product.id,
+                    'product_name': product.name,
+                    'sale_price': float(product.sale_price),
+                    'purchase_prices': {
+                        'average': float(avg_purchase) if avg_purchase else None,
+                        'last': float(last_purchase) if last_purchase else None,
+                        'minimum': float(min_purchase) if min_purchase else None,
+                    },
+                    'margin_percent': round(margin, 2),
+                    'below_min_markup': margin < float(current_store.min_markup_percent),
+                    'batches_count': product.batches.filter(quantity__gt=0).count(),
+                    'unit_display': product.unit_display
+                })
+
+        # Сортируем по марже
+        pricing_stats.sort(key=lambda x: x['margin_percent'])
+
+        # Статистика
+        margins = [p['margin_percent'] for p in pricing_stats if p['margin_percent'] is not None]
+        
+        summary = {
+            'total_products': len(pricing_stats),
+            'products_below_min_markup': len([p for p in pricing_stats if p['below_min_markup']]),
+            'average_margin': round(sum(margins) / len(margins), 2) if margins else 0,
+            'min_margin': min(margins) if margins else 0,
+            'max_margin': max(margins) if margins else 0,
+            'store_min_markup': float(current_store.min_markup_percent)
+        }
+
+        return Response({
+            'summary': summary,
+            'products': pricing_stats[:50],  # Первые 50 для производительности
+            'store': {
+                'id': str(current_store.id),
+                'name': current_store.name,
+                'min_markup_percent': float(current_store.min_markup_percent)
+            }
+        })
+
+    @action(detail=True, methods=['post'])
+    def update_pricing(self, request, pk=None):
+        """
+        Обновить цену товара с учетом минимальной наценки
+        """
+        product = self.get_object()
+        new_price = request.data.get('sale_price')
+        
+        if not new_price:
+            return Response(
+                {'error': 'Укажите новую цену в поле sale_price'},
+                status=400
+            )
+
+        try:
+            new_price = Decimal(str(new_price))
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'Некорректный формат цены'},
+                status=400
+            )
+
+        # Проверяем минимальную наценку
+        min_sale_price = product.min_sale_price
+        current_store = self.get_current_store()
+        
+        if new_price < min_sale_price and not current_store.allow_sale_below_markup:
+            # Проверяем права пользователя
+            if not hasattr(request.user, 'store_role') or request.user.store_role not in ['owner', 'admin']:
+                return Response({
+                    'error': f'Цена ниже минимальной наценки. Минимальная цена: {min_sale_price}',
+                    'min_price': float(min_sale_price),
+                    'requested_price': float(new_price),
+                    'min_markup_percent': float(current_store.min_markup_percent)
+                }, status=400)
+
+        # Обновляем цену
+        old_price = product.sale_price
+        product.sale_price = new_price
+        product.save()
+
+        logger.info(f"Price updated for {product.name}: {old_price} -> {new_price}")
+
+        return Response({
+            'message': 'Цена успешно обновлена',
+            'product': {
+                'id': product.id,
+                'name': product.name,
+                'old_price': float(old_price),
+                'new_price': float(new_price),
+                'unit_display': product.unit_display
+            },
+            'price_analysis': product.price_info
+        })
+
+    @action(detail=False, methods=['post'])
+    def bulk_update_pricing(self, request):
+        """
+        Массовое обновление цен товаров
+        """
+        current_store = self.get_current_store()
+        if not current_store:
+            return Response({'error': 'Магазин не определен'}, status=400)
+
+        # Проверяем права
+        if not hasattr(request.user, 'store_role') or request.user.store_role not in ['owner', 'admin']:
+            return Response({
+                'error': 'Недостаточно прав для массового обновления цен'
+            }, status=403)
+
+        updates = request.data.get('updates', [])
+        if not updates:
+            return Response({
+                'error': 'Укажите массив updates с product_id и sale_price'
+            }, status=400)
+
+        results = []
+        errors = []
+
+        with transaction.atomic():
+            for update_data in updates:
+                product_id = update_data.get('product_id')
+                new_price = update_data.get('sale_price')
+
+                try:
+                    product = Product.objects.get(id=product_id, store=current_store)
+                    new_price = Decimal(str(new_price))
+
+                    # Проверяем минимальную наценку
+                    min_sale_price = product.min_sale_price
+                    if new_price < min_sale_price and not current_store.allow_sale_below_markup:
+                        errors.append({
+                            'product_id': product_id,
+                            'product_name': product.name,
+                            'error': f'Цена ниже минимальной наценки: {min_sale_price}',
+                            'requested_price': float(new_price),
+                            'min_price': float(min_sale_price)
+                        })
+                        continue
+
+                    old_price = product.sale_price
+                    product.sale_price = new_price
+                    product.save()
+
+                    results.append({
+                        'product_id': product_id,
+                        'product_name': product.name,
+                        'old_price': float(old_price),
+                        'new_price': float(new_price),
+                        'success': True
+                    })
+
+                except Product.DoesNotExist:
+                    errors.append({
+                        'product_id': product_id,
+                        'error': 'Товар не найден'
+                    })
+                except (ValueError, TypeError):
+                    errors.append({
+                        'product_id': product_id,
+                        'error': 'Некорректный формат цены'
+                    })
+                except Exception as e:
+                    errors.append({
+                        'product_id': product_id,
+                        'error': str(e)
+                    })
+
+        return Response({
+            'message': f'Обновлено {len(results)} цен, ошибок: {len(errors)}',
+            'successful_updates': results,
+            'errors': errors,
+            'summary': {
+                'total_requested': len(updates),
+                'successful': len(results),
+                'failed': len(errors)
+            }
+        })
+
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
@@ -2072,6 +2409,169 @@ class SizeInfoViewSet(StoreViewSetMixin, ModelViewSet):
                 debug_info['sizes_info']['error'] = str(e)
 
         return Response(debug_info)
+
+    @action(detail=False, methods=['get'])
+    def by_category(self, request):
+        """
+        Получить размеры сгруппированные по категориям использования
+        """
+        current_store = self.get_current_store_safely()
+        if not current_store:
+            return Response({'error': 'Текущий магазин недоступен'}, status=400)
+
+        # Группируем размеры по первому слову в description или size
+        sizes = SizeInfo.objects.filter(store=current_store)
+        categories = {}
+
+        for size in sizes:
+            # Определяем категорию по description или размеру
+            category_key = 'Общее'
+            
+            if size.description:
+                first_word = size.description.split()[0].lower()
+                if 'труб' in first_word:
+                    category_key = 'Трубы'
+                elif 'фитинг' in first_word:
+                    category_key = 'Фитинги'
+                elif 'кабел' in first_word:
+                    category_key = 'Кабели'
+                elif 'профил' in first_word:
+                    category_key = 'Профили'
+            
+            if category_key not in categories:
+                categories[category_key] = []
+            
+            categories[category_key].append({
+                'id': size.id,
+                'size': size.size,
+                'dimension1': float(size.dimension1) if size.dimension1 else None,
+                'dimension2': float(size.dimension2) if size.dimension2 else None,
+                'dimension3': float(size.dimension3) if size.dimension3 else None,
+                'dimension1_label': size.dimension1_label,
+                'dimension2_label': size.dimension2_label,
+                'dimension3_label': size.dimension3_label,
+                'description': size.description,
+                'full_description': size.full_description
+            })
+
+        return Response({
+            'store': {
+                'id': str(current_store.id),
+                'name': current_store.name
+            },
+            'categories': categories,
+            'total_sizes': sizes.count()
+        })
+
+    @action(detail=False, methods=['post'])
+    def import_standard_sizes(self, request):
+        """
+        Импорт стандартных размеров для сантехники/стройматериалов
+        """
+        current_store = self.get_current_store_safely()
+        if not current_store:
+            return Response({'error': 'Текущий магазин недоступен'}, status=400)
+
+        # Проверяем права
+        if not hasattr(request.user, 'store_role') or request.user.store_role not in ['owner', 'admin']:
+            return Response({
+                'error': 'Недостаточно прав для импорта стандартных размеров'
+            }, status=403)
+
+        size_type = request.data.get('type', 'pipes')
+        
+        standard_sizes = []
+        
+        if size_type == 'pipes':
+            # Стандартные размеры труб
+            pipe_sizes = [
+                ('1/2"', 15, 20, 2.5, 'Труба полипропиленовая'),
+                ('3/4"', 20, 25, 2.5, 'Труба полипропиленовая'),
+                ('1"', 25, 32, 3.5, 'Труба полипропиленовая'),
+                ('1 1/4"', 32, 40, 4.0, 'Труба полипропиленовая'),
+                ('1 1/2"', 40, 50, 5.0, 'Труба полипропиленовая'),
+                ('2"', 50, 63, 6.5, 'Труба полипропиленовая'),
+                ('2 1/2"', 63, 75, 6.0, 'Труба полипропиленовая'),
+                ('3"', 75, 90, 7.5, 'Труба полипропиленовая'),
+                ('4"', 90, 110, 10.0, 'Труба полипропиленовая'),
+            ]
+            
+            for size_name, inner_d, outer_d, wall_thickness, desc in pipe_sizes:
+                standard_sizes.append({
+                    'size': size_name,
+                    'dimension1': inner_d,
+                    'dimension2': outer_d,
+                    'dimension3': wall_thickness,
+                    'dimension1_label': 'Внутр. диаметр (мм)',
+                    'dimension2_label': 'Внешн. диаметр (мм)',
+                    'dimension3_label': 'Толщина стенки (мм)',
+                    'description': desc
+                })
+        
+        elif size_type == 'cables':
+            # Стандартные сечения кабелей
+            cable_sizes = [
+                ('1.5', 1.5, None, None, 'Кабель ВВГ'),
+                ('2.5', 2.5, None, None, 'Кабель ВВГ'),
+                ('4', 4.0, None, None, 'Кабель ВВГ'),
+                ('6', 6.0, None, None, 'Кабель ВВГ'),
+                ('10', 10.0, None, None, 'Кабель ВВГ'),
+                ('16', 16.0, None, None, 'Кабель ВВГ'),
+                ('25', 25.0, None, None, 'Кабель ВВГ'),
+                ('35', 35.0, None, None, 'Кабель ВВГ'),
+                ('50', 50.0, None, None, 'Кабель ВВГ'),
+            ]
+            
+            for size_name, section, _, __, desc in cable_sizes:
+                standard_sizes.append({
+                    'size': f'{size_name} кв.мм',
+                    'dimension1': section,
+                    'dimension2': None,
+                    'dimension3': None,
+                    'dimension1_label': 'Сечение (кв.мм)',
+                    'dimension2_label': 'Количество жил',
+                    'dimension3_label': 'Диаметр (мм)',
+                    'description': desc
+                })
+
+        # Импортируем размеры
+        created_count = 0
+        skipped_count = 0
+        errors = []
+
+        for size_data in standard_sizes:
+            try:
+                # Проверяем существование
+                if SizeInfo.objects.filter(
+                    store=current_store,
+                    size=size_data['size']
+                ).exists():
+                    skipped_count += 1
+                    continue
+
+                # Создаем размер
+                SizeInfo.objects.create(
+                    store=current_store,
+                    **size_data
+                )
+                created_count += 1
+
+            except Exception as e:
+                errors.append({
+                    'size': size_data['size'],
+                    'error': str(e)
+                })
+
+        return Response({
+            'message': f'Импорт завершен. Создано: {created_count}, пропущено: {skipped_count}',
+            'summary': {
+                'created': created_count,
+                'skipped': skipped_count,
+                'errors': len(errors)
+            },
+            'errors': errors,
+            'type': size_type
+        })
 
 
 # Дополнительные утилитные views для конкретного магазина

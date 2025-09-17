@@ -4,7 +4,7 @@ from django.db import models
 from django.core.validators import MinValueValidator
 from django.db.models.signals import post_save
 from django.dispatch import receiver
-from django.db.models import Sum, F
+from django.db.models import Sum, F, Min
 from django.conf import settings
 from django.utils.text import format_lazy
 from django.core.files.base import ContentFile
@@ -20,6 +20,8 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.fonts import addMapping
 from stores.mixins import StoreOwnedModel, StoreOwnedManager
 from django.utils import timezone
+from decimal import Decimal
+
 
 
 pdfmetrics.registerFont(TTFont('DejaVuSans', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'))
@@ -721,52 +723,109 @@ class ProductBatch(StoreOwnedModel):
         on_delete=models.CASCADE,
         related_name='batches'
     )
-    quantity = models.PositiveIntegerField(
-        validators=[MinValueValidator(1)],
+    quantity = models.DecimalField(
+        max_digits=12,
+        decimal_places=3,
+        validators=[MinValueValidator(Decimal('0.001'))],
         verbose_name="Количество"
     )
     purchase_price = models.DecimalField(
-        max_digits=10,
+        max_digits=12,
         decimal_places=2,
         null=True,
         blank=True,
-        verbose_name="Цена закупки",
+        verbose_name="Цена закупки за единицу",
     )
     size = models.ForeignKey(
         SizeInfo,
         null=True,
         blank=True,
         on_delete=models.SET_NULL,
-        verbose_name="Размер"
+        verbose_name="Размер/Вариант",
+        help_text="Если товар имеет размерные вариации"
     )
-    supplier = models.CharField(max_length=255, blank=True, null=True,  verbose_name="Поставщик")
-    expiration_date = models.DateField(null=True, blank=True, verbose_name="Дата истечения")
+    supplier = models.CharField(
+        max_length=255, 
+        blank=True, 
+        null=True,  
+        verbose_name="Поставщик"
+    )
+    invoice_number = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        verbose_name="Номер накладной"
+    )
+    expiration_date = models.DateField(
+        null=True, 
+        blank=True, 
+        verbose_name="Срок годности",
+        help_text="Для герметиков, клеев и т.д."
+    )
     created_at = models.DateTimeField(auto_now_add=True)
+    
     objects = StoreOwnedManager()
 
     class Meta:
         verbose_name = "Партия товара"
         verbose_name_plural = "Партии товаров"
-        ordering = ['expiration_date', 'created_at']  # FIFO по умолчанию
+        ordering = ['expiration_date', 'created_at']
+
+    def __str__(self):
+        size_info = f" ({self.size.size})" if self.size else ""
+        return f"{self.product.name}{size_info} × {self.quantity} {self.product.unit_display}"
+
+    @property
+    def total_cost(self):
+        """Общая стоимость партии"""
+        if self.purchase_price:
+            return self.purchase_price * self.quantity
+        return Decimal('0')
+    
+    @property
+    def min_sale_price_per_unit(self):
+        """Минимальная цена продажи единицы из этой партии"""
+        if not self.purchase_price:
+            return Decimal('0')
+        
+        if hasattr(self.product.store, 'min_markup_percent'):
+            multiplier = 1 + (self.product.store.min_markup_percent / 100)
+            return self.purchase_price * Decimal(str(multiplier))
+        
+        return self.purchase_price
+    
+    def clean(self):
+        """Валидация"""
+        super().clean()
+        
+        if self.product and self.product.has_sizes and not self.size:
+            raise ValidationError("Для этого товара необходимо указать размер")
+        
+        if self.product and not self.product.has_sizes and self.size:
+            raise ValidationError("Этот товар не имеет размерных вариаций")
+        
+        if self.size and self.product:
+            if not self.product.available_sizes.filter(id=self.size.id).exists():
+                raise ValidationError(f"Размер {self.size} не доступен для товара {self.product.name}")
 
     def sell(self, quantity):
+        """Продажа из партии"""
+        quantity = Decimal(str(quantity))
+        
         if quantity > self.quantity:
             raise ValueError(
                 f"Недостаточно товара в партии. Доступно: {self.quantity}, запрошено: {quantity}"
             )
+        
         self.quantity = F('quantity') - quantity
         self.save(update_fields=['quantity'])
         self.refresh_from_db()
 
-        if self.quantity == 0:
+        if self.quantity <= 0:
             self.delete()
             logger.info(f"Партия {self.id} удалена (товар {self.product.name})")
 
         return quantity
-
-    def __str__(self):
-        return f"{self.product.name} × {self.quantity} (поставщик: {self.supplier})"
-
 
 class Stock(StoreOwnedModel):
     product = models.OneToOneField(
@@ -775,34 +834,44 @@ class Stock(StoreOwnedModel):
         related_name='stock',
         verbose_name="Товар"
     )
-    quantity = models.IntegerField(
+    quantity = models.DecimalField(
+        max_digits=12,
+        decimal_places=3,
         default=0,
         validators=[MinValueValidator(0)],
         verbose_name="Количество"
     )
     updated_at = models.DateTimeField(auto_now=True)
+    
     objects = StoreOwnedManager()
 
     class Meta:
         verbose_name = "Остаток на складе"
         verbose_name_plural = "Остатки на складе"
 
+    def __str__(self):
+        return f"{self.product.name}: {self.quantity} {self.product.unit_display}"
+
     def update_quantity(self):
         """Обновляет общее количество товара на основе партий"""
         total = self.product.batches.aggregate(
             total=Sum('quantity')
-        )['total'] or 0
+        )['total'] or Decimal('0')
         self.quantity = total
         self.save(update_fields=['quantity', 'updated_at'])
 
     def sell(self, quantity):
-        """Списывает товар по FIFO с обработкой ошибок"""
+        """Списывает товар по FIFO"""
+        quantity = Decimal(str(quantity))
+        
         if quantity <= 0:
             raise ValueError("Количество должно быть положительным")
 
         if self.quantity < quantity:
             raise ValueError(
-                f"Недостаточно товара '{self.product.name}'. Доступно: {self.quantity}, запрошено: {quantity}"
+                f"Недостаточно товара '{self.product.name}'. "
+                f"Доступно: {self.quantity} {self.product.unit_display}, "
+                f"запрошено: {quantity}"
             )
 
         remaining = quantity
@@ -817,10 +886,8 @@ class Stock(StoreOwnedModel):
             remaining -= sell_amount
 
         self.update_quantity()
-        logger.info(f"Продано {quantity} {self.product.get_unit_display()} {self.product.name}")
+        logger.info(f"Продано {quantity} {self.product.unit_display} {self.product.name}")
 
-    def __str__(self):
-        return f"{self.product.name}: {self.quantity} {self.product.get_unit_display()}"
 
 
 # ✅ ИСПРАВЛЕНИЕ: Исправляем сигналы

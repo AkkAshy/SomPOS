@@ -1,241 +1,102 @@
-#sales/serializers.py
+# sales/serializers.py - ОБНОВЛЕННАЯ ВЕРСИЯ
 from rest_framework import serializers
-from .models import Transaction, TransactionItem, TransactionHistory
+from .models import Transaction, TransactionItem, TransactionHistory, TransactionRefund, TransactionRefundItem
 from inventory.models import Product
 from customers.models import Customer
 from django.utils.translation import gettext_lazy as _
 import logging
 import json
 from django.contrib.auth import get_user_model
-
+from decimal import Decimal
+from django.db import models
 
 User = get_user_model()
 
 logger = logging.getLogger('sales')
 
+
 class TransactionItemSerializer(serializers.ModelSerializer):
     """
-    Упрощенный сериализатор - ТОЛЬКО product_id и quantity
-    Цена НЕ принимается с фронта
+    ОБНОВЛЕННЫЙ сериализатор для элементов транзакции с поддержкой дробных единиц
     """
     product_id = serializers.PrimaryKeyRelatedField(
         queryset=Product.objects.all(),
         source='product',
         help_text="ID товара"
     )
-    quantity = serializers.IntegerField(
-        min_value=1,
-        help_text="Количество товара"
+    quantity = serializers.DecimalField(
+        max_digits=15,
+        decimal_places=3,
+        min_value=Decimal('0.001'),
+        help_text="Количество товара (поддерживает дробные значения)"
     )
-    # ✅ УБИРАЕМ поле price из входных данных!
-    # price будет только для чтения при выводе
+    # Цена только для чтения - берется из товара
     price = serializers.DecimalField(
-        max_digits=10,
+        max_digits=12,
         decimal_places=2,
-        read_only=True,  # ← ТОЛЬКО ДЛЯ ЧТЕНИЯ!
+        read_only=True,
         help_text="Цена за единицу (берется из товара)"
     )
+    # Дополнительная информация для вывода
+    unit_display = serializers.CharField(read_only=True)
+    unit_type = serializers.CharField(read_only=True)
+    subtotal = serializers.DecimalField(max_digits=15, decimal_places=2, read_only=True)
+    size_snapshot = serializers.JSONField(read_only=True)
 
     class Meta:
         model = TransactionItem
-        fields = ['product_id', 'quantity', 'price']  # price только для вывода
+        fields = [
+            'product_id', 'quantity', 'price', 'unit_display', 
+            'unit_type', 'subtotal', 'size_snapshot'
+        ]
 
+    def validate_quantity(self, value):
+        """
+        Валидация количества с учетом настроек товара
+        """
+        # Базовая проверка
+        if value <= 0:
+            raise serializers.ValidationError("Количество должно быть больше нуля")
 
-# sales/serializers.py - исправленный TransactionSerializer
+        # Получаем товар из контекста (если есть)
+        if hasattr(self, 'initial_data'):
+            product_id = self.initial_data.get('product_id')
+            if product_id:
+                try:
+                    product = Product.objects.get(id=product_id)
+                    
+                    # Проверяем минимальное количество
+                    min_quantity = product.min_sale_quantity
+                    if value < min_quantity:
+                        raise serializers.ValidationError(
+                            f"Минимальное количество для продажи: {min_quantity} {product.unit_display}"
+                        )
+                    
+                    # Проверяем поддержку дробных значений
+                    if not product.allow_decimal and value % 1 != 0:
+                        raise serializers.ValidationError(
+                            f"Товар '{product.name}' не поддерживает дробные количества"
+                        )
+                    
+                    # Проверяем соответствие шагу
+                    step = product.quantity_step
+                    if step and step > 0:
+                        remainder = value % step
+                        if remainder > Decimal('0.001'):  # Допуск на погрешность
+                            raise serializers.ValidationError(
+                                f"Количество должно соответствовать шагу {step} {product.unit_display}"
+                            )
+                
+                except Product.DoesNotExist:
+                    pass  # Ошибка обработается в другом месте
 
-# class TransactionSerializer(serializers.ModelSerializer):
-#     items = TransactionItemSerializer(many=True)
-#     customer = serializers.PrimaryKeyRelatedField(
-#         queryset=Customer.objects.all(), required=False, allow_null=True
-#     )
-#     new_customer = serializers.DictField(
-#         child=serializers.CharField(), required=False
-#     )
-#     cashier_name = serializers.CharField(source='cashier.username', read_only=True)
-#     customer_name = serializers.CharField(source='customer.full_name', read_only=True)
-#     store_name = serializers.CharField(source='store.name', read_only=True)
+        return value
 
-#     class Meta:
-#         model = Transaction
-#         fields = [
-#             'id', 'cashier', 'cashier_name', 'total_amount',
-#             'payment_method', 'status', 'customer', 'customer_name',
-#             'new_customer', 'items', 'created_at', 'store_name'
-#         ]
-#         read_only_fields = ['id', 'cashier', 'cashier_name', 'total_amount', 'created_at', 'store_name']
-
-#     def validate(self, data):
-#         items = data.get('items', [])
-#         customer = data.get('customer')
-#         new_customer = data.get('new_customer')
-#         payment_method = data.get('payment_method', 'cash')
-
-#         if not items:
-#             raise serializers.ValidationError(
-#                 {"items": _("Должен быть хотя бы один товар")}
-#             )
-
-#         if payment_method == 'debt' and not (customer or new_customer):
-#             raise serializers.ValidationError(
-#                 {"error": _("Для оплаты в долг требуется customer_id или new_customer")}
-#             )
-
-#         if new_customer:
-#             if not new_customer.get('full_name') or not new_customer.get('phone'):
-#                 raise serializers.ValidationError(
-#                     {"new_customer": _("Поля full_name и phone обязательны")}
-#                 )
-
-#         # Получаем текущий магазин из контекста
-#         request = self.context.get('request')
-#         current_store = None
-
-#         if request and hasattr(request.user, 'current_store'):
-#             current_store = request.user.current_store
-#         else:
-#             # Пытаемся получить из JWT
-#             from rest_framework_simplejwt.tokens import AccessToken
-#             auth_header = request.META.get('HTTP_AUTHORIZATION', '')
-#             if auth_header.startswith('Bearer '):
-#                 try:
-#                     token = auth_header.split(' ')[1]
-#                     decoded_token = AccessToken(token)
-#                     store_id = decoded_token.get('store_id')
-#                     if store_id:
-#                         from stores.models import Store
-#                         current_store = Store.objects.filter(id=store_id).first()
-#                 except:
-#                     current_store = None
-
-#         # Проверяем доступность товаров в текущем магазине
-#         total_amount = 0
-#         for item in items:
-#             product = item['product']
-#             quantity = item['quantity']
-
-#             # Проверяем что товар принадлежит текущему магазину
-#             if current_store and hasattr(product, 'store'):
-#                 if product.store != current_store:
-#                     raise serializers.ValidationError(
-#                         {"items": _(f"Товар {product.name} не принадлежит текущему магазину")}
-#                     )
-
-#             # Проверяем наличие на складе
-#             if not hasattr(product, 'stock'):
-#                 raise serializers.ValidationError(
-#                     {"items": _(f"У товара {product.name} нет информации о складе")}
-#                 )
-
-#             if product.stock.quantity < quantity:
-#                 raise serializers.ValidationError(
-#                     {"items": _(f"Недостаточно товара {product.name} на складе. Доступно: {product.stock.quantity}")}
-#                 )
-
-#             total_amount += product.sale_price * quantity
-
-#         data['total_amount'] = total_amount
-#         return data
-
-#     def create(self, validated_data):
-#         items_data = validated_data.pop('items')
-#         customer = validated_data.pop('customer', None)
-#         new_customer = validated_data.pop('new_customer', None)
-
-#         # ✅ ИСПРАВЛЕНИЕ: Убираем 'cashier' из validated_data
-#         validated_data.pop('cashier', None)
-
-#         # Получаем пользователя и магазин из контекста
-#         request = self.context['request']
-#         user = request.user
-
-#         # Магазин должен быть установлен через perform_create в ViewSet
-#         # Но на всякий случай проверяем
-#         if 'store' not in validated_data:
-#             if hasattr(user, 'current_store') and user.current_store:
-#                 validated_data['store'] = user.current_store
-#             else:
-#                 raise serializers.ValidationError(
-#                     {"error": "Не удалось определить текущий магазин"}
-#                 )
-
-#         # Обрабатываем нового покупателя
-#         if new_customer:
-#             phone = new_customer['phone']
-#             # Ищем покупателя по телефону в текущем магазине
-#             customer, created = Customer.objects.get_or_create(
-#                 phone=phone,
-#                 store=validated_data['store'],
-#                 defaults={'full_name': new_customer['full_name']}
-#             )
-#             if created:
-#                 logger.info(f"Created new customer: {customer.full_name} in store {validated_data['store'].name}")
-
-#         # ✅ ИСПРАВЛЕНИЕ: Создаем транзакцию с явным указанием cashier
-#         transaction = Transaction.objects.create(
-#             cashier=user,  # ← Явно указываем cashier
-#             customer=customer,
-#             **validated_data  # ← Теперь не содержит cashier
-#         )
-#         logger.info(f"Transaction #{transaction.id} created in store {transaction.store.name}")
-
-#         # Создаем элементы транзакции с привязкой к магазину
-#         for item_data in items_data:
-#             product = item_data['product']
-#             quantity = item_data['quantity']
-#             price = item_data.get('price', product.sale_price)
-
-#             TransactionItem.objects.create(
-#                 transaction=transaction,
-#                 product=product,
-#                 quantity=quantity,
-#                 price=price,
-#                 store=transaction.store  # Явно указываем store
-#             )
-#             logger.info(
-#                 f"Transaction item created: Product {product.name}, Quantity: {quantity}, Store: {transaction.store.name}"
-#             )
-
-#         # Обрабатываем продажу
-#         try:
-#             transaction.process_sale()
-#             logger.info(f"Transaction #{transaction.id} processed successfully. Total: {transaction.total_amount}")
-#         except Exception as e:
-#             logger.error(f"Error processing transaction #{transaction.id}: {str(e)}")
-#             # Откатываем транзакцию
-#             transaction.status = 'failed'
-#             transaction.save()
-#             raise serializers.ValidationError(
-#                 {"error": f"Ошибка обработки продажи: {str(e)}"}
-#             )
-
-#         return transaction
-
-#     def to_representation(self, instance):
-#         """Добавляем дополнительную информацию при чтении"""
-#         data = super().to_representation(instance)
-
-#         # Добавляем информацию о магазине
-#         if instance.store:
-#             data['store'] = {
-#                 'id': str(instance.store.id),
-#                 'name': instance.store.name
-#             }
-
-#         # Добавляем детали товаров
-#         items_detail = []
-#         for item in instance.items.all():
-#             items_detail.append({
-#                 'product_id': item.product.id,
-#                 'product_name': item.product.name,
-#                 'quantity': item.quantity,
-#                 'price': str(item.price),
-#                 'subtotal': str(item.quantity * item.price)
-#             })
-#         data['items_detail'] = items_detail
-
-#         return data
 
 class TransactionSerializer(serializers.ModelSerializer):
+    """
+    ОБНОВЛЕННЫЙ сериализатор для транзакций
+    """
     items = TransactionItemSerializer(many=True)
     customer = serializers.PrimaryKeyRelatedField(
         queryset=Customer.objects.all(), required=False, allow_null=True
@@ -246,19 +107,45 @@ class TransactionSerializer(serializers.ModelSerializer):
     cashier_name = serializers.CharField(source='cashier.username', read_only=True)
     customer_name = serializers.CharField(source='customer.full_name', read_only=True)
     store_name = serializers.CharField(source='store.name', read_only=True)
+    
+    # Дополнительная информация
+    items_with_units = serializers.SerializerMethodField()
+    items_count_display = serializers.SerializerMethodField()
 
     class Meta:
         model = Transaction
         fields = [
             'id', 'cashier', 'cashier_name', 'total_amount',
             'payment_method', 'status', 'customer', 'customer_name',
-            'new_customer', 'items', 'created_at', 'store_name'
+            'new_customer', 'items', 'created_at', 'store_name',
+            'items_with_units', 'items_count_display'
         ]
-        read_only_fields = ['id', 'cashier', 'cashier_name', 'total_amount', 'created_at', 'store_name']
+        read_only_fields = [
+            'id', 'cashier', 'cashier_name', 'total_amount', 'created_at', 
+            'store_name', 'items_with_units', 'items_count_display'
+        ]
+
+    def get_items_with_units(self, obj):
+        """Возвращает информацию о товарах с единицами измерения"""
+        try:
+            return obj.get_total_items_with_units()
+        except:
+            return []
+
+    def get_items_count_display(self, obj):
+        """Возвращает красивое отображение количества товаров"""
+        try:
+            items_count = obj.items_count
+            if items_count % 1 == 0:
+                return f"{int(items_count)} ед."
+            else:
+                return f"{items_count} ед."
+        except:
+            return "0 ед."
 
     def validate(self, data):
         """
-        Валидация с автоматическим расчетом цены из БД
+        ОБНОВЛЕННАЯ валидация с автоматическим расчетом цены из БД
         """
         items = data.get('items', [])
         customer = data.get('customer')
@@ -266,20 +153,20 @@ class TransactionSerializer(serializers.ModelSerializer):
         payment_method = data.get('payment_method', 'cash')
 
         if not items:
-            raise serializers.ValidationError(
-                {"items": _("Должен быть хотя бы один товар")}
-            )
+            raise serializers.ValidationError({
+                "items": _("Должен быть хотя бы один товар")
+            })
 
         if payment_method == 'debt' and not (customer or new_customer):
-            raise serializers.ValidationError(
-                {"error": _("Для оплаты в долг требуется customer_id или new_customer")}
-            )
+            raise serializers.ValidationError({
+                "error": _("Для оплаты в долг требуется customer_id или new_customer")
+            })
 
         if new_customer:
             if not new_customer.get('full_name') or not new_customer.get('phone'):
-                raise serializers.ValidationError(
-                    {"new_customer": _("Поля full_name и phone обязательны")}
-                )
+                raise serializers.ValidationError({
+                    "new_customer": _("Поля full_name и phone обязательны")
+                })
 
         # Получаем текущий магазин
         request = self.context.get('request')
@@ -302,56 +189,92 @@ class TransactionSerializer(serializers.ModelSerializer):
                 except:
                     current_store = None
 
-        # ✅ ГЛАВНОЕ ИЗМЕНЕНИЕ: Рассчитываем сумму ТОЛЬКО из цен в БД
-        total_amount = 0
-        for item in items:
-            product = item['product']
-            quantity = item['quantity']
+        # Рассчитываем сумму ТОЛЬКО из цен в БД
+        total_amount = Decimal('0')
+        validated_items = []
+        
+        for item_data in items:
+            product = item_data['product']
+            quantity = Decimal(str(item_data['quantity']))
 
-            # ✅ НЕ ПРИНИМАЕМ цену с фронта - ВСЕГДА берем из товара
-            # Даже если фронт попытается передать цену, мы её игнорируем
-            item.pop('price', None)  # Удаляем если вдруг пришла
+            # Удаляем цену если вдруг пришла с фронта
+            item_data.pop('price', None)
 
             # Берем актуальную цену из базы данных
             actual_price = product.sale_price
 
             if actual_price <= 0:
-                raise serializers.ValidationError(
-                    {"items": _(f"У товара {product.name} некорректная цена в базе данных: {actual_price}")}
-                )
+                raise serializers.ValidationError({
+                    "items": _(f"У товара {product.name} некорректная цена в базе данных: {actual_price}")
+                })
 
             logger.info(f"Using price from DB for {product.name}: {actual_price}")
 
             # Проверяем принадлежность к магазину
             if current_store and hasattr(product, 'store'):
                 if product.store != current_store:
-                    raise serializers.ValidationError(
-                        {"items": _(f"Товар {product.name} не принадлежит текущему магазину")}
-                    )
+                    raise serializers.ValidationError({
+                        "items": _(f"Товар {product.name} не принадлежит текущему магазину")
+                    })
 
             # Проверяем наличие на складе
             if not hasattr(product, 'stock'):
-                raise serializers.ValidationError(
-                    {"items": _(f"У товара {product.name} нет информации о складе")}
-                )
+                raise serializers.ValidationError({
+                    "items": _(f"У товара {product.name} нет информации о складе")
+                })
 
-            if product.stock.quantity < quantity:
-                raise serializers.ValidationError(
-                    {"items": _(f"Недостаточно товара {product.name} на складе. Доступно: {product.stock.quantity}")}
-                )
+            # Конвертируем quantity в float для проверки Stock
+            quantity_float = float(quantity)
+            if product.stock.quantity < quantity_float:
+                raise serializers.ValidationError({
+                    "items": _(f"Недостаточно товара {product.name} на складе. "
+                             f"Доступно: {product.stock.quantity} {product.unit_display}, "
+                             f"запрошено: {quantity} {product.unit_display}")
+                })
+
+            # Валидируем количество согласно настройкам товара
+            min_quantity = product.min_sale_quantity
+            if quantity < min_quantity:
+                raise serializers.ValidationError({
+                    "items": _(f"Количество {quantity} {product.unit_display} товара {product.name} "
+                             f"меньше минимального: {min_quantity} {product.unit_display}")
+                })
+
+            if not product.allow_decimal and quantity % 1 != 0:
+                raise serializers.ValidationError({
+                    "items": _(f"Товар {product.name} не поддерживает дробные количества")
+                })
+
+            step = product.quantity_step
+            if step and step > 0:
+                remainder = quantity % step
+                if remainder > Decimal('0.001'):
+                    raise serializers.ValidationError({
+                        "items": _(f"Количество {quantity} товара {product.name} не соответствует шагу {step}")
+                    })
 
             # Считаем общую сумму ТОЛЬКО с ценой из БД
-            total_amount += actual_price * quantity
+            item_total = actual_price * quantity
+            total_amount += item_total
+            
+            validated_items.append({
+                'product': product,
+                'quantity': quantity,
+                'price': actual_price,
+                'subtotal': item_total
+            })
 
         data['total_amount'] = total_amount
+        data['validated_items'] = validated_items
         logger.info(f"Total amount calculated from DB prices: {total_amount}")
         return data
 
     def create(self, validated_data):
         """
-        Создание транзакции с ценами ТОЛЬКО из БД
+        ОБНОВЛЕННОЕ создание транзакции с дробными количествами
         """
         items_data = validated_data.pop('items')
+        validated_items = validated_data.pop('validated_items', [])
         customer = validated_data.pop('customer', None)
         new_customer = validated_data.pop('new_customer', None)
 
@@ -367,9 +290,9 @@ class TransactionSerializer(serializers.ModelSerializer):
             if hasattr(user, 'current_store') and user.current_store:
                 validated_data['store'] = user.current_store
             else:
-                raise serializers.ValidationError(
-                    {"error": "Не удалось определить текущий магазин"}
-                )
+                raise serializers.ValidationError({
+                    "error": "Не удалось определить текущий магазин"
+                })
 
         # Обрабатываем нового покупателя
         if new_customer:
@@ -390,31 +313,30 @@ class TransactionSerializer(serializers.ModelSerializer):
         )
         logger.info(f"Transaction #{transaction.id} created in store {transaction.store.name}")
 
-        # ✅ Создаем элементы транзакции с ценами ТОЛЬКО из БД
-        for item_data in items_data:
+        # Создаем элементы транзакции с ценами ТОЛЬКО из БД
+        for item_data in validated_items:
             product = item_data['product']
             quantity = item_data['quantity']
-
-            # ✅ ВСЕГДА берем цену из товара в БД
-            price_from_db = product.sale_price
+            price_from_db = item_data['price']
 
             # Дополнительная проверка
             if price_from_db <= 0:
                 logger.error(f"Invalid price in DB for product {product.name}: {price_from_db}")
-                raise serializers.ValidationError(
-                    {"error": f"Некорректная цена товара {product.name} в базе данных"}
-                )
+                raise serializers.ValidationError({
+                    "error": f"Некорректная цена товара {product.name} в базе данных"
+                })
 
-            TransactionItem.objects.create(
+            transaction_item = TransactionItem.objects.create(
                 transaction=transaction,
                 product=product,
                 quantity=quantity,
-                price=price_from_db,  # ← ТОЛЬКО цена из БД!
+                price=price_from_db,
                 store=transaction.store
             )
+            
             logger.info(
-                f"Transaction item created: {product.name} x{quantity} @ {price_from_db} "
-                f"(price from DB)"
+                f"Transaction item created: {product.name} x{quantity} {product.unit_display} "
+                f"@ {price_from_db} (price from DB)"
             )
 
         # Обрабатываем продажу
@@ -425,15 +347,15 @@ class TransactionSerializer(serializers.ModelSerializer):
             logger.error(f"Error processing transaction #{transaction.id}: {str(e)}")
             transaction.status = 'failed'
             transaction.save()
-            raise serializers.ValidationError(
-                {"error": f"Ошибка обработки продажи: {str(e)}"}
-            )
+            raise serializers.ValidationError({
+                "error": f"Ошибка обработки продажи: {str(e)}"
+            })
 
         return transaction
 
     def to_representation(self, instance):
         """
-        При выводе показываем детальную информацию
+        ОБНОВЛЕННОЕ представление с дополнительной информацией о единицах
         """
         data = super().to_representation(instance)
 
@@ -444,17 +366,50 @@ class TransactionSerializer(serializers.ModelSerializer):
                 'name': instance.store.name
             }
 
-        # Добавляем детали товаров с ценами
+        # Добавляем детали товаров с единицами измерения
         items_detail = []
         for item in instance.items.all():
-            items_detail.append({
+            item_detail = {
                 'product_id': item.product.id,
                 'product_name': item.product.name,
-                'quantity': item.quantity,
-                'price': str(item.price),  # Цена которая была сохранена (из БД)
-                'subtotal': str(item.quantity * item.price)
-            })
+                'quantity': str(item.quantity),  # Сохраняем точность Decimal
+                'quantity_display': f"{item.quantity} {item.unit_display}",
+                'unit_display': item.unit_display,
+                'unit_type': item.unit_type,
+                'price': str(item.price),
+                'subtotal': str(item.subtotal),
+                'is_fractional': item.quantity % 1 != 0
+            }
+            
+            # Добавляем информацию о размере если есть
+            if item.size_snapshot:
+                item_detail['size_info'] = item.size_snapshot
+            
+            items_detail.append(item_detail)
+            
         data['items_detail'] = items_detail
+
+        # Добавляем сводную информацию о единицах измерения
+        units_summary = {}
+        for item in instance.items.all():
+            unit_key = item.unit_display or 'шт'
+            if unit_key not in units_summary:
+                units_summary[unit_key] = {
+                    'total_quantity': Decimal('0'),
+                    'total_amount': Decimal('0'),
+                    'items_count': 0
+                }
+            
+            units_summary[unit_key]['total_quantity'] += item.quantity
+            units_summary[unit_key]['total_amount'] += item.subtotal
+            units_summary[unit_key]['items_count'] += 1
+
+        # Конвертируем в сериализуемый формат
+        for unit_key in units_summary:
+            units_summary[unit_key]['total_quantity'] = str(units_summary[unit_key]['total_quantity'])
+            units_summary[unit_key]['total_amount'] = str(units_summary[unit_key]['total_amount'])
+
+        data['units_summary'] = units_summary
 
         return data
 
@@ -485,45 +440,100 @@ class FilteredTransactionHistorySerializer(serializers.ModelSerializer):
         except json.JSONDecodeError:
             return None
 
-# class FilteredTransactionHistorySerializer(serializers.ModelSerializer):
-#     """
-#     Сериализатор с фильтрацией - возвращает только валидные записи
-#     """
-#     parsed_details = serializers.SerializerMethodField()
-
-#     class Meta:
-#         model = TransactionHistory
-#         fields = ['id', 'transaction', 'action', 'parsed_details', 'created_at']
-
-#     def get_parsed_details(self, obj):
-#         try:
-#             details = json.loads(obj.details)
-
-#             # Возвращаем только если есть обязательные поля
-#             if (details.get('total_amount') and
-#                 details.get('items') and
-#                 len(details.get('items', [])) > 0):
-#                 return details
-
-#             return None  # Если данные неполные
-
-#         except json.JSONDecodeError:
-#             return None
-
-    # def to_representation(self, instance):
-    #     """
-    #     Переопределяем для исключения записей с пустыми parsed_details
-    #     """
-    #     data = super().to_representation(instance)
-
-    #     # Если parsed_details пустые, возвращаем None (исключаем из результата)
-    #     if not data.get('parsed_details'):
-    #         return None
-
-    #     return data
 
 class CashierAggregateSerializer(serializers.Serializer):
     cashier_id = serializers.IntegerField()
     cashier_name = serializers.CharField()
-    total_quantity = serializers.IntegerField()
+    total_quantity = serializers.DecimalField(max_digits=15, decimal_places=3)  # Обновлено
     total_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+
+
+# НОВЫЕ сериализаторы для возвратов
+class TransactionRefundItemSerializer(serializers.ModelSerializer):
+    """
+    Сериализатор для элементов возврата
+    """
+    original_product_name = serializers.CharField(source='original_item.product.name', read_only=True)
+    original_quantity = serializers.DecimalField(
+        source='original_item.quantity', 
+        max_digits=15, 
+        decimal_places=3, 
+        read_only=True
+    )
+    can_refund_quantity = serializers.DecimalField(
+        max_digits=15, 
+        decimal_places=3, 
+        read_only=True
+    )
+
+    class Meta:
+        model = TransactionRefundItem
+        fields = [
+            'id', 'original_item', 'original_product_name', 
+            'original_quantity', 'refunded_quantity', 'refunded_amount',
+            'can_refund_quantity'
+        ]
+
+    def validate_refunded_quantity(self, value):
+        """Проверяем, что не возвращаем больше чем было продано"""
+        if self.instance:
+            original_item = self.instance.original_item
+        else:
+            original_item = self.initial_data.get('original_item')
+            if isinstance(original_item, int):
+                original_item = TransactionItem.objects.get(id=original_item)
+
+        if not original_item:
+            raise serializers.ValidationError("Не найден оригинальный элемент транзакции")
+
+        # Проверяем максимальное количество для возврата
+        max_refund = self.get_max_refund_quantity(original_item)
+        
+        if value > max_refund:
+            raise serializers.ValidationError(
+                f"Нельзя вернуть больше {max_refund} {original_item.unit_display}"
+            )
+
+        return value
+
+    def get_max_refund_quantity(self, original_item):
+        """Вычисляет максимальное количество для возврата"""
+        already_refunded = TransactionRefundItem.objects.filter(
+            original_item=original_item
+        ).exclude(id=self.instance.id if self.instance else None).aggregate(
+            total=models.Sum('refunded_quantity')
+        )['total'] or Decimal('0')
+        
+        return original_item.quantity - already_refunded
+
+
+class TransactionRefundSerializer(serializers.ModelSerializer):
+    """
+    Сериализатор для возвратов транзакций
+    """
+    items = TransactionRefundItemSerializer(many=True)
+    processed_by_name = serializers.CharField(source='processed_by.username', read_only=True)
+    original_transaction_number = serializers.IntegerField(source='original_transaction.id', read_only=True)
+
+    class Meta:
+        model = TransactionRefund
+        fields = [
+            'id', 'original_transaction', 'original_transaction_number',
+            'refund_transaction', 'refunded_amount', 'refund_type',
+            'reason', 'processed_by', 'processed_by_name', 'created_at', 'items'
+        ]
+        read_only_fields = ['processed_by', 'created_at']
+
+    def create(self, validated_data):
+        items_data = validated_data.pop('items', [])
+        
+        # Устанавливаем обработчика
+        validated_data['processed_by'] = self.context['request'].user
+        
+        refund = TransactionRefund.objects.create(**validated_data)
+        
+        # Создаем элементы возврата
+        for item_data in items_data:
+            TransactionRefundItem.objects.create(refund=refund, **item_data)
+        
+        return refund

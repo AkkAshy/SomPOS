@@ -1,14 +1,15 @@
-# inventory/serializers.py
+# inventory/serializers.py - ОБНОВЛЕННАЯ ВЕРСИЯ
 from rest_framework import serializers
 from django.utils.translation import gettext_lazy as _
 from django.utils import timezone
 from drf_yasg.utils import swagger_serializer_method
 from django.db import transaction
+from decimal import Decimal
 
 from .models import (Product, ProductCategory, Stock,
                      ProductBatch, AttributeType,
                      AttributeValue, ProductAttribute,
-                     SizeChart, SizeInfo
+                     SizeChart, SizeInfo, CustomUnit
                      )
 from users.serializers import UserSerializer
 import logging
@@ -17,124 +18,55 @@ from stores.mixins import StoreSerializerMixin
 logger = logging.getLogger('inventory')
 
 
+class CustomUnitSerializer(StoreSerializerMixin, serializers.ModelSerializer):
+    """
+    Сериализатор для пользовательских единиц измерения
+    """
+    class Meta:
+        model = CustomUnit
+        fields = [
+            'id', 'name', 'short_name', 'allow_decimal', 
+            'min_quantity', 'step'
+        ]
+        read_only_fields = ['id']
 
-# class ProductCategorySerializer(serializers.ModelSerializer):
-#     class Meta:
-#         model = ProductCategory
-#         fields = ['id', 'name', 'created_at']
-#         read_only_fields = ['created_at']
-#         extra_kwargs = {'name': {'trim_whitespace': True}}
-#         ref_name = 'ProductCategorySerializerInventory'
+    def validate_short_name(self, value):
+        """Проверяем уникальность сокращения в рамках магазина"""
+        value = value.strip()
+        request = self.context.get('request')
+        
+        if request and hasattr(request.user, 'current_store') and request.user.current_store:
+            current_store = request.user.current_store
+            
+            existing_query = CustomUnit.objects.filter(
+                store=current_store,
+                short_name__iexact=value
+            )
+            
+            if self.instance:
+                existing_query = existing_query.exclude(pk=self.instance.pk)
+            
+            if existing_query.exists():
+                raise serializers.ValidationError(
+                    f"Единица с сокращением '{value}' уже существует в вашем магазине"
+                )
+        
+        return value
 
-#     def validate_name(self, value):
-#         value = value.strip()
-
-#         # ✅ ИСПРАВЛЕНИЕ: Проверяем уникальность ТОЛЬКО в рамках текущего магазина
-#         request = self.context.get('request')
-
-#         if not request:
-#             # Если нет контекста запроса, используем глобальную проверку как fallback
-#             if ProductCategory.objects.filter(name__iexact=value).exists():
-#                 raise serializers.ValidationError(
-#                     _("Категория с названием '%(name)s' уже существует") % {'name': value},
-#                     code='duplicate_category'
-#                 )
-#             return value
-
-#         # Получаем текущий магазин из пользователя
-#         current_store = None
-
-#         # Способ 1: Из атрибута пользователя (установлено middleware)
-#         if hasattr(request.user, 'current_store') and request.user.current_store:
-#             current_store = request.user.current_store
-
-#         # Способ 2: Из JWT токена
-#         if not current_store:
-#             auth_header = request.META.get('HTTP_AUTHORIZATION', '')
-#             if auth_header.startswith('Bearer '):
-#                 try:
-#                     from rest_framework_simplejwt.tokens import AccessToken
-#                     token = auth_header.split(' ')[1]
-#                     decoded_token = AccessToken(token)
-#                     store_id = decoded_token.get('store_id')
-
-#                     if store_id:
-#                         from stores.models import Store
-#                         current_store = Store.objects.filter(id=store_id).first()
-#                 except Exception:
-#                     pass
-
-#         # Способ 3: Через StoreEmployee
-#         if not current_store:
-#             from stores.models import StoreEmployee
-#             store_membership = StoreEmployee.objects.filter(
-#                 user=request.user,
-#                 is_active=True
-#             ).select_related('store').first()
-
-#             if store_membership:
-#                 current_store = store_membership.store
-
-#         if not current_store:
-#             raise serializers.ValidationError(
-#                 _("Не удалось определить текущий магазин"),
-#                 code='no_store'
-#             )
-
-#         # ✅ ГЛАВНОЕ ИСПРАВЛЕНИЕ: Проверяем уникальность только в ТЕКУЩЕМ магазине
-#         existing_query = ProductCategory.objects.filter(
-#             store=current_store,  # ← ФИЛЬТР ПО МАГАЗИНУ!
-#             name__iexact=value
-#         )
-
-#         # Если это обновление существующей категории, исключаем её из проверки
-#         if self.instance:
-#             existing_query = existing_query.exclude(pk=self.instance.pk)
-
-#         if existing_query.exists():
-#             raise serializers.ValidationError(
-#                 _("Категория с названием '%(name)s' уже существует в вашем магазине") % {'name': value},
-#                 code='duplicate_category_in_store'
-#             )
-
-#         return value
-
-#     # ✅ ИСПРАВЛЕНИЕ: Убираем кастомный create и используем стандартный
-#     # def create(self, validated_data):
-#     #     """
-#     #     При создании НЕ устанавливаем store здесь - это сделает StoreViewSetMixin.perform_create()
-#     #     """
-#     #     return ProductCategory(**validated_data)
-
-#     def update(self, instance, validated_data):
-#         """
-#         При обновлении проверяем что категория принадлежит текущему магазину
-#         """
-#         request = self.context.get('request')
-#         if request and hasattr(request.user, 'current_store') and request.user.current_store:
-#             if instance.store != request.user.current_store:
-#                 raise serializers.ValidationError(
-#                     _("Вы не можете редактировать категории другого магазина"),
-#                     code='wrong_store'
-#                 )
-
-#         return super().update(instance, validated_data)
 
 class ProductCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductCategory
-        fields = ['id', 'name', 'created_at', 'is_deleted']  # Добавляем is_deleted
+        fields = ['id', 'name', 'created_at', 'is_deleted']
         read_only_fields = ['created_at', 'is_deleted']
         extra_kwargs = {'name': {'trim_whitespace': True}}
         ref_name = 'ProductCategorySerializerInventory'
 
     def validate_name(self, value):
         value = value.strip()
-
         request = self.context.get('request')
 
         if not request:
-            # ✅ ИСПРАВЛЕНИЕ: Проверяем только среди активных категорий
             if ProductCategory.objects.filter(name__iexact=value).exists():
                 raise serializers.ValidationError(
                     _("Категория с названием '%(name)s' уже существует") % {'name': value},
@@ -142,7 +74,7 @@ class ProductCategorySerializer(serializers.ModelSerializer):
                 )
             return value
 
-        # Получаем текущий магазин (тот же код что был)
+        # Получаем текущий магазин
         current_store = None
 
         if hasattr(request.user, 'current_store') and request.user.current_store:
@@ -163,15 +95,15 @@ class ProductCategorySerializer(serializers.ModelSerializer):
                 except Exception:
                     pass
 
-        if not current_store:
-            from stores.models import StoreEmployee
-            store_membership = StoreEmployee.objects.filter(
-                user=request.user,
-                is_active=True
-            ).select_related('store').first()
+            if not current_store:
+                from stores.models import StoreEmployee
+                store_membership = StoreEmployee.objects.filter(
+                    user=request.user,
+                    is_active=True
+                ).select_related('store').first()
 
-            if store_membership:
-                current_store = store_membership.store
+                if store_membership:
+                    current_store = store_membership.store
 
         if not current_store:
             raise serializers.ValidationError(
@@ -179,19 +111,16 @@ class ProductCategorySerializer(serializers.ModelSerializer):
                 code='no_store'
             )
 
-        # ✅ ГЛАВНОЕ ИСПРАВЛЕНИЕ: Проверяем уникальность только среди АКТИВНЫХ категорий
+        # Проверяем уникальность только среди АКТИВНЫХ категорий
         existing_query = ProductCategory.objects.filter(
             store=current_store,
             name__iexact=value
-            # deleted_at__isnull=True уже включено в objects manager
         )
 
-        # Если это обновление существующей категории, исключаем её из проверки
         if self.instance:
             existing_query = existing_query.exclude(pk=self.instance.pk)
 
         if existing_query.exists():
-            # Проверяем, есть ли удаленная категория с таким именем
             deleted_category = ProductCategory.all_objects.filter(
                 store=current_store,
                 name__iexact=value,
@@ -230,53 +159,34 @@ class ProductCategorySerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 
-############################################################# Атрибуты #############################################################
-class AttributeValueSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = AttributeValue
-        fields = ['id', 'attribute_type', 'value', 'slug']
-
-class AttributeTypeSerializer(serializers.ModelSerializer):
-    values = AttributeValueSerializer(many=True, read_only=True)
-
-    class Meta:
-        model = AttributeType
-        fields = ['id', 'name', 'slug', 'is_filterable', 'values']
-
-class ProductAttributeSerializer(serializers.ModelSerializer):
-    attribute = AttributeValueSerializer(read_only=True)
-    attribute_id = serializers.PrimaryKeyRelatedField(
-        queryset=AttributeValue.objects.all(),
-        source='attribute',
-        write_only=True,
-        help_text=_('ID значения атрибута')
-    )
-
-    class Meta:
-        model = ProductAttribute
-        fields = ['attribute', 'attribute_id']
-############################################################# Атрибуты конец #############################################################
-
-
-class SizeChartSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = SizeChart
-        fields = ['id', 'name', 'values']
-
 class SizeInfoSerializer(StoreSerializerMixin, serializers.ModelSerializer):
+    """
+    ОБНОВЛЕННЫЙ сериализатор для размерной информации с новыми полями
+    """
     size = serializers.CharField()
     store_name = serializers.CharField(source='store.name', read_only=True)
+    full_description = serializers.CharField(read_only=True)
 
     class Meta:
         model = SizeInfo
-        fields = ['id', 'size', 'chest', 'waist', 'length', 'store_name', 'is_deleted']
-        read_only_fields = ['id', 'store_name', 'is_deleted']
+        fields = [
+            'id', 'size', 'dimension1', 'dimension2', 'dimension3',
+            'dimension1_label', 'dimension2_label', 'dimension3_label',
+            'description', 'sort_order', 'store_name', 'is_deleted',
+            'full_description'
+        ]
+        read_only_fields = ['id', 'store_name', 'is_deleted', 'full_description']
         swagger_schema_fields = {
             'example': {
-                'size': 'XXL',
-                'chest': 100,
-                'waist': 80,
-                'length': 70
+                'size': '1/2"',
+                'dimension1': 15.0,
+                'dimension2': 20.0,
+                'dimension3': 2.5,
+                'dimension1_label': 'Внутр. диаметр',
+                'dimension2_label': 'Внешн. диаметр',
+                'dimension3_label': 'Толщина стенки',
+                'description': 'Труба полипропиленовая',
+                'sort_order': 0
             }
         }
 
@@ -285,10 +195,8 @@ class SizeInfoSerializer(StoreSerializerMixin, serializers.ModelSerializer):
         if not value or not value.strip():
             raise serializers.ValidationError("Размер не может быть пустым")
 
-        # Приводим к верхнему регистру для консистентности
-        value = value.strip().upper()
+        value = value.strip()
 
-        # Проверяем длину
         if len(value) > 50:
             raise serializers.ValidationError("Размер не может быть длиннее 50 символов")
 
@@ -302,15 +210,13 @@ class SizeInfoSerializer(StoreSerializerMixin, serializers.ModelSerializer):
         if not request:
             return attrs
 
-        # Получаем текущий магазин (используем ту же логику что в категориях)
+        # Получаем текущий магазин
         current_store = None
 
         if hasattr(request.user, 'current_store') and request.user.current_store:
             current_store = request.user.current_store
 
         if not current_store:
-            # Попробуем получить из JWT токена или через StoreEmployee
-            # (тот же код что в категориях)
             auth_header = request.META.get('HTTP_AUTHORIZATION', '')
             if auth_header.startswith('Bearer '):
                 try:
@@ -340,19 +246,16 @@ class SizeInfoSerializer(StoreSerializerMixin, serializers.ModelSerializer):
 
         size = attrs.get('size')
 
-        # ✅ ГЛАВНОЕ ИСПРАВЛЕНИЕ: Проверяем уникальность только среди АКТИВНЫХ размеров
+        # Проверяем уникальность только среди АКТИВНЫХ размеров
         existing_query = SizeInfo.objects.filter(
             store=current_store,
             size=size
-            # deleted_at__isnull=True уже включено в objects manager
         )
 
-        # Если это обновление существующего размера, исключаем его из проверки
         if self.instance:
             existing_query = existing_query.exclude(pk=self.instance.pk)
 
         if existing_query.exists():
-            # Проверяем, есть ли удаленный размер с таким именем
             deleted_size = SizeInfo.all_objects.filter(
                 store=current_store,
                 size=size,
@@ -387,30 +290,64 @@ class SizeInfoSerializer(StoreSerializerMixin, serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 
-############################################################## Продукты #############################################################
+# Остальные сериализаторы остаются без изменений
+class AttributeValueSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AttributeValue
+        fields = ['id', 'attribute_type', 'value', 'slug']
+
+class AttributeTypeSerializer(serializers.ModelSerializer):
+    values = AttributeValueSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = AttributeType
+        fields = ['id', 'name', 'slug', 'is_filterable', 'values']
+
+class ProductAttributeSerializer(serializers.ModelSerializer):
+    attribute = AttributeValueSerializer(read_only=True)
+    attribute_id = serializers.PrimaryKeyRelatedField(
+        queryset=AttributeValue.objects.all(),
+        source='attribute',
+        write_only=True,
+        help_text=_('ID значения атрибута')
+    )
+
+    class Meta:
+        model = ProductAttribute
+        fields = ['attribute', 'attribute_id']
+
+
+class SizeChartSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SizeChart
+        fields = ['id', 'name', 'values']
+
 
 class ProductBatchSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
-    size = serializers.SerializerMethodField()
+    size_info = serializers.SerializerMethodField()
 
     class Meta:
         model = ProductBatch
         fields = [
-            'id',
-            'product',
-            'product_name',
-            'quantity',
-            'purchase_price',
-            'size',
-            'supplier',
-            'expiration_date',
-            'created_at'
+            'id', 'product', 'product_name', 'quantity', 'purchase_price',
+            'size_info', 'supplier', 'expiration_date', 'created_at'
         ]
 
-    def get_size(self, obj):
-        """Возвращает размер из поля size модели Product"""
-        if obj.product.size:  # Проверяем, есть ли связанный размер
-            return obj.product.size.size  # Возвращаем значение поля size из SizeInfo
+    def get_size_info(self, obj):
+        """Возвращает информацию о размере"""
+        if obj.size:
+            return {
+                'id': obj.size.id,
+                'size': obj.size.size,
+                'dimension1': float(obj.size.dimension1) if obj.size.dimension1 else None,
+                'dimension2': float(obj.size.dimension2) if obj.size.dimension2 else None,
+                'dimension3': float(obj.size.dimension3) if obj.size.dimension3 else None,
+                'dimension1_label': obj.size.dimension1_label,
+                'dimension2_label': obj.size.dimension2_label,
+                'dimension3_label': obj.size.dimension3_label,
+                'full_description': obj.size.full_description
+            }
         return None
 
     def validate_quantity(self, value):
@@ -431,53 +368,75 @@ class ProductBatchSerializer(serializers.ModelSerializer):
         return data
 
 
-
 class ProductSerializer(StoreSerializerMixin, serializers.ModelSerializer):
+    """
+    ОБНОВЛЕННЫЙ сериализатор для товаров с новой системой единиц измерения
+    """
     category_name = serializers.CharField(source='category.name', read_only=True)
-    size = SizeInfoSerializer(read_only=True)
-    current_stock = serializers.IntegerField(
-        source='stock.quantity',
-        read_only=True,
-        help_text=_('Текущий остаток на складе')
-    )
-    size_id = serializers.PrimaryKeyRelatedField(
-        source='size',
+    
+    # Размеры и варианты
+    default_size = SizeInfoSerializer(read_only=True)
+    available_sizes = SizeInfoSerializer(many=True, read_only=True)
+    default_size_id = serializers.PrimaryKeyRelatedField(
+        source='default_size',
         queryset=SizeInfo.objects.all(),
         write_only=True,
         required=False,
         allow_null=True
     )
-    unit = serializers.ChoiceField(
-        choices=Product.UNIT_CHOICES,
-        read_only=True,
-        help_text=_('Единица измерения товара')
-    )
-    batches = ProductBatchSerializer(
+    available_size_ids = serializers.PrimaryKeyRelatedField(
+        source='available_sizes',
+        queryset=SizeInfo.objects.all(),
         many=True,
-        read_only=True,
-        help_text=_('Партии товара')
+        write_only=True,
+        required=False
     )
+    
+    # Единицы измерения
+    custom_unit = CustomUnitSerializer(read_only=True)
+    custom_unit_id = serializers.PrimaryKeyRelatedField(
+        source='custom_unit',
+        queryset=CustomUnit.objects.all(),
+        write_only=True,
+        required=False,
+        allow_null=True
+    )
+    unit_display = serializers.CharField(read_only=True)
+    
+    # Остатки и партии
+    current_stock = serializers.IntegerField(
+        source='stock.quantity',
+        read_only=True,
+        help_text=_('Текущий остаток на складе')
+    )
+    batches = ProductBatchSerializer(many=True, read_only=True)
+    
+    # Ценовая информация
+    price_info = serializers.JSONField(read_only=True)
+    
+    # Размерная информация
+    sizes_info = serializers.JSONField(read_only=True)
+    
+    # Метаданные
     created_by = UserSerializer(read_only=True)
 
     class Meta:
         model = Product
         fields = [
-            'id',
-            'name',
-            'barcode',
-            'category',
-            'category_name',
-            'sale_price',
-            'created_at',
-            'size',
-            'size_id',
-            'unit',
-            'current_stock',
-            'batches',
-            'image_label',
-            'created_by'
+            'id', 'name', 'barcode', 'category', 'category_name',
+            'unit_type', 'custom_unit', 'custom_unit_id', 'unit_display',
+            'override_min_quantity', 'override_step',
+            'sale_price', 'price_info',
+            'has_sizes', 'default_size', 'default_size_id', 
+            'available_sizes', 'available_size_ids', 'sizes_info',
+            'attributes', 'created_at', 'created_by',
+            'current_stock', 'batches', 'image_label',
+            'is_deleted', 'deleted_at'
         ]
-        read_only_fields = ['created_at', 'current_stock', 'created_by']
+        read_only_fields = [
+            'created_at', 'current_stock', 'created_by', 'unit_display',
+            'price_info', 'sizes_info', 'is_deleted', 'deleted_at'
+        ]
         extra_kwargs = {
             'name': {'trim_whitespace': True},
             'barcode': {'required': False, 'allow_blank': True},
@@ -508,11 +467,11 @@ class ProductSerializer(StoreSerializerMixin, serializers.ModelSerializer):
                 code='barcode_too_long'
             )
 
-        # ✅ ИСПРАВЛЕНО: Проверяем уникальность с учетом магазина
+        # Проверяем уникальность с учетом магазина
         request = self.context.get('request')
         if request and hasattr(request.user, 'current_store') and request.user.current_store:
             existing_query = Product.objects.filter(
-                store=request.user.current_store,  # ← Фильтр по магазину
+                store=request.user.current_store,
                 barcode=value
             )
 
@@ -527,55 +486,66 @@ class ProductSerializer(StoreSerializerMixin, serializers.ModelSerializer):
 
         return value
 
+    def validate(self, attrs):
+        """Валидация единиц измерения"""
+        unit_type = attrs.get('unit_type')
+        custom_unit = attrs.get('custom_unit')
+
+        # Должна быть указана единица измерения
+        if not unit_type and not custom_unit:
+            raise serializers.ValidationError(
+                "Укажите единицу измерения (системную или пользовательскую)"
+            )
+
+        if unit_type and custom_unit:
+            raise serializers.ValidationError(
+                "Выберите либо системную, либо пользовательскую единицу"
+            )
+
+        return attrs
+
     def create(self, validated_data):
-        """
-        ✅ ИСПРАВЛЕННОЕ создание товара - НЕ ТРОГАЕМ СИГНАЛЫ
-        """
-        size = validated_data.pop('size', None)
+        """Создание товара с обработкой размеров"""
+        # Извлекаем размеры
+        default_size = validated_data.pop('default_size', None)
+        available_sizes = validated_data.pop('available_sizes', [])
 
-        # ✅ ВАЖНО: НЕ устанавливаем created_by здесь - это сделает StoreViewSetMixin
-        # ✅ ВАЖНО: НЕ устанавливаем store здесь - это сделает StoreViewSetMixin
-
-        # Создаем товар БЕЗ store и created_by - их установит миксин в perform_create
+        # Создаем товар
         product = Product(**validated_data)
-
-        # НЕ СОХРАНЯЕМ ЕЩЕ! Пусть StoreViewSetMixin.perform_create сохранит с store
         return product
 
     def update(self, instance, validated_data):
-        size = validated_data.pop('size', None)
+        """Обновление товара с обработкой размеров"""
+        # Извлекаем размеры
+        default_size = validated_data.pop('default_size', None)
+        available_sizes = validated_data.pop('available_sizes', None)
+
+        # Обновляем основные поля
         product = super().update(instance, validated_data)
-        if size is not None:
-            product.size = size
-            product.save()
+
+        # Обновляем размеры
+        if default_size is not None:
+            product.default_size = default_size
+
+        if available_sizes is not None:
+            product.available_sizes.set(available_sizes)
+
+        product.save()
         return product
 
+
 class StockSerializer(serializers.ModelSerializer):
-    product_name = serializers.CharField(
-        source='product.name',
-        read_only=True
-    )
-
-    product_barcode = serializers.CharField(
-        source='product.barcode',
-        read_only=True,
-        allow_null=True
-    )
-
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    product_barcode = serializers.CharField(source='product.barcode', read_only=True, allow_null=True)
+    unit_display = serializers.CharField(source='product.unit_display', read_only=True)
 
     class Meta:
         model = Stock
         fields = [
-            'product', 'product_name', 'product_barcode',
+            'product', 'product_name', 'product_barcode', 'unit_display',
             'quantity', 'updated_at'
         ]
-        read_only_fields = ['updated_at', 'product_name', 'product_barcode']
-        swagger_schema_fields = {
-            'example': {
-                'product': 1,
-                'quantity': 100
-            }
-        }
+        read_only_fields = ['updated_at', 'product_name', 'product_barcode', 'unit_display']
 
     def validate_quantity(self, value):
         if value < 0:
@@ -587,15 +557,45 @@ class StockSerializer(serializers.ModelSerializer):
 
 
 class ProductMultiSizeCreateSerializer(serializers.Serializer):
+    """
+    ОБНОВЛЕННЫЙ сериализатор для создания товаров с размерами
+    """
     name = serializers.CharField(max_length=255)
     category = serializers.PrimaryKeyRelatedField(queryset=ProductCategory.objects.all())
     sale_price = serializers.DecimalField(max_digits=12, decimal_places=2)
-    unit = serializers.CharField(max_length=50, default='piece')
+    unit_type = serializers.ChoiceField(
+        choices=Product.SYSTEM_UNITS,
+        required=False,
+        allow_null=True
+    )
+    custom_unit_id = serializers.PrimaryKeyRelatedField(
+        queryset=CustomUnit.objects.all(),
+        required=False,
+        allow_null=True
+    )
     batch_info = serializers.ListField(
         child=serializers.DictField(),
         required=False,
         allow_empty=True
     )
+
+    def validate(self, attrs):
+        """Валидация единиц измерения"""
+        unit_type = attrs.get('unit_type')
+        custom_unit_id = attrs.get('custom_unit_id')
+
+        # Должна быть указана единица измерения
+        if not unit_type and not custom_unit_id:
+            raise serializers.ValidationError(
+                "Укажите единицу измерения (системную или пользовательскую)"
+            )
+
+        if unit_type and custom_unit_id:
+            raise serializers.ValidationError(
+                "Выберите либо системную, либо пользовательскую единицу"
+            )
+
+        return attrs
 
     def validate_batch_info(self, value):
         """Валидация batch_info"""
@@ -603,31 +603,25 @@ class ProductMultiSizeCreateSerializer(serializers.Serializer):
             return value
 
         for batch in value:
-            # Проверяем обязательные поля
             required_fields = ['size_id', 'quantity', 'purchase_price', 'supplier']
             for field in required_fields:
                 if field not in batch:
                     raise serializers.ValidationError(f"Поле '{field}' обязательно для batch_info")
 
-            # Проверяем что size_id существует
             try:
                 SizeInfo.objects.get(id=batch['size_id'])
             except SizeInfo.DoesNotExist:
                 raise serializers.ValidationError(f"Размер с ID {batch['size_id']} не найден")
 
-            # Проверяем количество
             if batch['quantity'] <= 0:
                 raise serializers.ValidationError("Количество должно быть больше нуля")
 
         return value
 
     def create(self, validated_data):
-        """
-        ✅ ИСПРАВЛЕННОЕ создание множественных товаров
-        """
-        # Извлекаем необходимые данные
-        store = validated_data.get('store')  # Передается из view
-        created_by = validated_data.get('created_by')  # Передается из view
+        """Создание множественных товаров с новой системой единиц"""
+        store = validated_data.get('store')
+        created_by = validated_data.get('created_by')
 
         if not store:
             raise serializers.ValidationError("Store is required")
@@ -640,84 +634,68 @@ class ProductMultiSizeCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError("batch_info с размерами обязателен")
 
         created_products = []
-
-        # Извлекаем уникальные размеры из batch_info
         size_ids = list(set(batch['size_id'] for batch in batch_info))
 
         try:
             with transaction.atomic():
                 for size_id in size_ids:
                     try:
-                        # Получаем размер
                         size_instance = SizeInfo.objects.get(id=size_id)
-
-                        # Создаем имя товара с размером
                         product_name = f"{validated_data['name']} - {size_instance.size}"
-
-                        # Генерируем уникальный штрих-код
                         unique_barcode = self.generate_unique_barcode(store)
 
-                        # ✅ Создаем товар СРАЗУ с store
-                        product = Product.objects.create(
-                            name=product_name,
-                            barcode=unique_barcode,
-                            created_by=created_by,
-                            category=validated_data['category'],
-                            sale_price=validated_data['sale_price'],
-                            unit=validated_data.get('unit', 'piece'),
-                            size=size_instance,
-                            store=store  # ← ВАЖНО: устанавливаем store сразу
-                        )
+                        # Подготавливаем данные для создания товара
+                        product_data = {
+                            'name': product_name,
+                            'barcode': unique_barcode,
+                            'created_by': created_by,
+                            'category': validated_data['category'],
+                            'sale_price': validated_data['sale_price'],
+                            'store': store,
+                            'has_sizes': True,
+                            'default_size': size_instance
+                        }
 
-                        logger.info(f"✅ Multi-size product created: {product.name} in store {store.name}")
+                        # Устанавливаем единицу измерения
+                        if validated_data.get('unit_type'):
+                            product_data['unit_type'] = validated_data['unit_type']
+                        elif validated_data.get('custom_unit_id'):
+                            product_data['custom_unit'] = validated_data['custom_unit_id']
 
-                        # ✅ Создаем Stock вручную с правильным store
+                        # Создаем товар
+                        product = Product.objects.create(**product_data)
+
+                        # Создаем Stock
                         Stock.objects.get_or_create(
                             product=product,
-                            defaults={
-                                'store': store,
-                                'quantity': 0
-                            }
+                            defaults={'store': store, 'quantity': 0}
                         )
-                        logger.info(f"✅ Stock created for multi-size product: {product.name}")
 
-                        # Создаем batch для этого размера
+                        # Создаем batch
                         batch_for_size = next((b for b in batch_info if b['size_id'] == size_id), None)
                         if batch_for_size:
                             batch = ProductBatch.objects.create(
                                 product=product,
-                                store=store,  # ← ВАЖНО: устанавливаем store
+                                store=store,
+                                size=size_instance,
                                 quantity=batch_for_size['quantity'],
                                 purchase_price=batch_for_size['purchase_price'],
                                 supplier=batch_for_size['supplier'],
                                 expiration_date=batch_for_size.get('expiration_date')
                             )
-                            logger.info(f"✅ Batch created for multi-size product: {product.name}")
 
-                            # Обновляем количество в Stock
                             product.stock.update_quantity()
-
-                        # Генерируем этикетку
-                        try:
-                            product.generate_label()
-                            logger.info(f"✅ Label generated for multi-size product: {product.name}")
-                        except Exception as e:
-                            logger.error(f"⚠️ Label generation failed for {product.name}: {str(e)}")
 
                         created_products.append(product)
 
                     except SizeInfo.DoesNotExist:
-                        logger.error(f"❌ Size with ID {size_id} not found")
+                        logger.error(f"Size with ID {size_id} not found")
                         raise serializers.ValidationError(f"Размер с ID {size_id} не найден")
-                    except Exception as e:
-                        logger.error(f"❌ Error creating product for size {size_id}: {str(e)}")
-                        raise
 
         except Exception as e:
-            logger.error(f"❌ Transaction failed in multi-size creation: {str(e)}")
+            logger.error(f"Transaction failed in multi-size creation: {str(e)}")
             raise
 
-        logger.info(f"✅ Successfully created {len(created_products)} multi-size products")
         return created_products
 
     def generate_unique_barcode(self, store):
@@ -730,22 +708,17 @@ class ProductMultiSizeCreateSerializer(serializers.Serializer):
         attempts = 0
 
         while attempts < max_attempts:
-            # Генерируем на основе времени и случайных чисел
             timestamp = str(int(time.time()))[-6:]
             random_part = str(random.randint(100000, 999999))
             barcode_code = timestamp + random_part
-
-            # Добавляем контрольную сумму
             checksum = self._calculate_ean13_checksum(barcode_code)
             full_barcode = barcode_code + checksum
 
-            # Проверяем уникальность В ПРЕДЕЛАХ МАГАЗИНА
             if not Product.objects.filter(store=store, barcode=full_barcode).exists():
                 return full_barcode
 
             attempts += 1
 
-        # Fallback - используем UUID
         return str(uuid.uuid4().int)[:12]
 
     def _calculate_ean13_checksum(self, digits):

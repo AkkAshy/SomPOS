@@ -1,4 +1,4 @@
-# analytics/models.py
+# analytics/models.py - ОБНОВЛЕННАЯ ВЕРСИЯ
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 from inventory.models import Product, ProductCategory
@@ -14,7 +14,7 @@ logger = logging.getLogger('analytics')
 class SalesSummaryManager(StoreOwnedManager):
     def update_from_transaction(self, transaction):
         summary, created = self.get_or_create(
-            store=transaction.store,   # ✅ берём магазин из транзакции
+            store=transaction.store,
             date=transaction.created_at.date(),
             payment_method=transaction.payment_method,
             defaults={
@@ -49,7 +49,7 @@ class SalesSummary(StoreOwnedModel):
         max_length=20, choices=Transaction.PAYMENT_METHODS
     )
 
-    objects = StoreOwnedManager()
+    objects = SalesSummaryManager()
 
     class Meta:
         verbose_name = _("Сводка по продажам")
@@ -63,7 +63,7 @@ class SalesSummary(StoreOwnedModel):
 
 class ProductAnalytics(models.Model):
     """
-    Статистика по товарам: сколько продано, выручка, популярность.
+    ОБНОВЛЕННАЯ статистика по товарам с учетом новой структуры товаров
     """
     product = models.ForeignKey(
         Product, on_delete=models.CASCADE, related_name='analytics',
@@ -77,12 +77,46 @@ class ProductAnalytics(models.Model):
         related_name="product_analytics"
     )
     date = models.DateField(verbose_name=_("Дата"))
-    quantity_sold = models.PositiveIntegerField(
-        default=0, verbose_name=_("Продано единиц")
+    quantity_sold = models.DecimalField(
+        max_digits=15,  # Увеличено для поддержки дробных единиц
+        decimal_places=3,  # Поддержка до тысячных
+        default=0,
+        verbose_name=_("Продано единиц")
     )
     revenue = models.DecimalField(
         max_digits=12, decimal_places=2, default=0.00,
         verbose_name=_("Выручка")
+    )
+    
+    # Новые поля для анализа единиц измерения
+    unit_type = models.CharField(
+        max_length=50,
+        null=True,
+        blank=True,
+        verbose_name="Тип единицы измерения"
+    )
+    unit_display = models.CharField(
+        max_length=20,
+        null=True,
+        blank=True,
+        verbose_name="Отображение единицы"
+    )
+    
+    # Информация о размере (если применимо)
+    size_info = models.JSONField(
+        null=True,
+        blank=True,
+        verbose_name="Информация о размере",
+        help_text="JSON с данными о размере товара на момент продажи"
+    )
+    
+    # Средняя цена за единицу
+    average_unit_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name="Средняя цена за единицу"
     )
 
     class Meta:
@@ -90,14 +124,42 @@ class ProductAnalytics(models.Model):
         verbose_name_plural = _("Аналитика товаров")
         unique_together = ('product', 'date')
         ordering = ['-date']
+        indexes = [
+            models.Index(fields=['date', 'product']),
+            models.Index(fields=['unit_type', 'date']),
+        ]
 
     def __str__(self):
-        return f"{self.product.name} - {self.date} ({self.quantity_sold} шт.)"
+        return f"{self.product.name} - {self.date} ({self.quantity_sold} {self.unit_display})"
+
+    def save(self, *args, **kwargs):
+        """Автоматически заполняем информацию о единицах при сохранении"""
+        if self.product:
+            self.unit_type = self.product.unit_type or 'custom'
+            self.unit_display = self.product.unit_display
+            
+            # Сохраняем информацию о размере
+            if self.product.has_sizes and self.product.default_size:
+                self.size_info = {
+                    'size': self.product.default_size.size,
+                    'dimension1': float(self.product.default_size.dimension1) if self.product.default_size.dimension1 else None,
+                    'dimension2': float(self.product.default_size.dimension2) if self.product.default_size.dimension2 else None,
+                    'dimension3': float(self.product.default_size.dimension3) if self.product.default_size.dimension3 else None,
+                    'dimension1_label': self.product.default_size.dimension1_label,
+                    'dimension2_label': self.product.default_size.dimension2_label,
+                    'dimension3_label': self.product.default_size.dimension3_label,
+                }
+            
+            # Рассчитываем среднюю цену за единицу
+            if self.quantity_sold and self.quantity_sold > 0:
+                self.average_unit_price = self.revenue / self.quantity_sold
+        
+        super().save(*args, **kwargs)
 
 
 class CustomerAnalytics(models.Model):
     """
-    Статистика по клиентам: покупки, долги, лояльность.
+    Статистика по клиентам
     """
     customer = models.ForeignKey(
         Customer, on_delete=models.CASCADE, related_name='analytics',
@@ -131,3 +193,219 @@ class CustomerAnalytics(models.Model):
 
     def __str__(self):
         return f"{self.customer.full_name} - {self.date} ({self.total_purchases})"
+
+
+class UnitAnalytics(StoreOwnedModel):
+    """
+    НОВАЯ модель: Аналитика по единицам измерения
+    """
+    date = models.DateField(verbose_name=_("Дата"))
+    unit_type = models.CharField(
+        max_length=50,
+        verbose_name="Тип единицы измерения"
+    )
+    unit_display = models.CharField(
+        max_length=20,
+        verbose_name="Отображение единицы"
+    )
+    is_custom = models.BooleanField(
+        default=False,
+        verbose_name="Пользовательская единица"
+    )
+    
+    # Статистика продаж
+    total_quantity_sold = models.DecimalField(
+        max_digits=15,
+        decimal_places=3,
+        default=0,
+        verbose_name="Общее количество проданного"
+    )
+    total_revenue = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        verbose_name="Общая выручка"
+    )
+    products_count = models.PositiveIntegerField(
+        default=0,
+        verbose_name="Количество товаров с этой единицей"
+    )
+    transactions_count = models.PositiveIntegerField(
+        default=0,
+        verbose_name="Количество транзакций"
+    )
+    
+    # Средние показатели
+    average_unit_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name="Средняя цена за единицу"
+    )
+
+    objects = StoreOwnedManager()
+
+    class Meta:
+        verbose_name = _("Аналитика единиц измерения")
+        verbose_name_plural = _("Аналитика единиц измерения")
+        unique_together = ('store', 'date', 'unit_type', 'unit_display')
+        ordering = ['-date', 'unit_display']
+
+    def __str__(self):
+        return f"{self.unit_display} - {self.date} ({self.total_quantity_sold})"
+
+    def calculate_metrics(self):
+        """Рассчитывает производные метрики"""
+        if self.total_quantity_sold and self.total_quantity_sold > 0:
+            self.average_unit_price = self.total_revenue / self.total_quantity_sold
+
+
+class SizeAnalytics(StoreOwnedModel):
+    """
+    НОВАЯ модель: Аналитика по размерам товаров
+    """
+    date = models.DateField(verbose_name=_("Дата"))
+    size_name = models.CharField(
+        max_length=50,
+        verbose_name="Название размера"
+    )
+    
+    # Параметры размера на момент анализа
+    dimension1 = models.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        null=True,
+        blank=True,
+        verbose_name="Параметр 1"
+    )
+    dimension2 = models.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        null=True,
+        blank=True,
+        verbose_name="Параметр 2"  
+    )
+    dimension3 = models.DecimalField(
+        max_digits=10,
+        decimal_places=3,
+        null=True,
+        blank=True,
+        verbose_name="Параметр 3"
+    )
+    
+    # Метки параметров
+    dimension1_label = models.CharField(max_length=50, null=True, blank=True)
+    dimension2_label = models.CharField(max_length=50, null=True, blank=True)
+    dimension3_label = models.CharField(max_length=50, null=True, blank=True)
+    
+    # Статистика продаж
+    total_quantity_sold = models.DecimalField(
+        max_digits=15,
+        decimal_places=3,
+        default=0,
+        verbose_name="Общее количество проданного"
+    )
+    total_revenue = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        verbose_name="Общая выручка"
+    )
+    products_count = models.PositiveIntegerField(
+        default=0,
+        verbose_name="Количество товаров этого размера"
+    )
+    transactions_count = models.PositiveIntegerField(
+        default=0,
+        verbose_name="Количество транзакций"
+    )
+
+    objects = StoreOwnedManager()
+
+    class Meta:
+        verbose_name = _("Аналитика размеров")
+        verbose_name_plural = _("Аналитика размеров")
+        unique_together = ('store', 'date', 'size_name')
+        ordering = ['-date', 'size_name']
+
+    def __str__(self):
+        return f"{self.size_name} - {self.date} ({self.total_quantity_sold})"
+
+    @property
+    def full_description(self):
+        """Полное описание размера с параметрами"""
+        parts = [self.size_name]
+        
+        if self.dimension1 and self.dimension1_label:
+            parts.append(f"{self.dimension1_label}: {self.dimension1}")
+        if self.dimension2 and self.dimension2_label:
+            parts.append(f"{self.dimension2_label}: {self.dimension2}")
+        if self.dimension3 and self.dimension3_label:
+            parts.append(f"{self.dimension3_label}: {self.dimension3}")
+            
+        return " | ".join(parts)
+
+
+class CategoryAnalytics(StoreOwnedModel):
+    """
+    НОВАЯ модель: Аналитика по категориям товаров
+    """
+    date = models.DateField(verbose_name=_("Дата"))
+    category = models.ForeignKey(
+        ProductCategory,
+        on_delete=models.CASCADE,
+        related_name='analytics',
+        verbose_name=_("Категория")
+    )
+    
+    # Статистика продаж
+    total_quantity_sold = models.DecimalField(
+        max_digits=15,
+        decimal_places=3,
+        default=0,
+        verbose_name="Общее количество проданного"
+    )
+    total_revenue = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        verbose_name="Общая выручка"
+    )
+    products_count = models.PositiveIntegerField(
+        default=0,
+        verbose_name="Количество товаров в категории"
+    )
+    transactions_count = models.PositiveIntegerField(
+        default=0,
+        verbose_name="Количество транзакций"
+    )
+    unique_products_sold = models.PositiveIntegerField(
+        default=0,
+        verbose_name="Уникальных товаров продано"
+    )
+    
+    # Средние показатели
+    average_transaction_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name="Средняя сумма транзакции"
+    )
+
+    objects = StoreOwnedManager()
+
+    class Meta:
+        verbose_name = _("Аналитика категорий")
+        verbose_name_plural = _("Аналитика категорий")
+        unique_together = ('store', 'date', 'category')
+        ordering = ['-date', 'category__name']
+
+    def __str__(self):
+        return f"{self.category.name} - {self.date} ({self.total_revenue})"
+
+    def calculate_metrics(self):
+        """Рассчитывает производные метрики"""
+        if self.transactions_count > 0:
+            self.average_transaction_amount = self.total_revenue / self.transactions_count
