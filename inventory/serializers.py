@@ -9,7 +9,8 @@ from decimal import Decimal
 from .models import (Product, ProductCategory, Stock,
                      ProductBatch, AttributeType,
                      AttributeValue, ProductAttribute,
-                     SizeChart, SizeInfo, CustomUnit
+                     SizeChart, SizeInfo, CustomUnit,
+                     ProductBatchAttribute
                      )
 from users.serializers import UserSerializer
 import logging
@@ -393,7 +394,8 @@ class ProductSerializer(StoreSerializerMixin, serializers.ModelSerializer):
         write_only=True,
         required=False
     )
-    
+    batch_attributes = serializers.SerializerMethodField()
+
     # Единицы измерения
     custom_unit = CustomUnitSerializer(read_only=True)
     custom_unit_id = serializers.PrimaryKeyRelatedField(
@@ -433,7 +435,7 @@ class ProductSerializer(StoreSerializerMixin, serializers.ModelSerializer):
             'available_sizes', 'available_size_ids', 'sizes_info',
             'attributes', 'created_at', 'created_by',
             'current_stock', 'batches', 'image_label',
-            'is_deleted', 'deleted_at'
+            'is_deleted', 'deleted_at', 'batch_attributes',
         ]
         read_only_fields = [
             'created_at', 'current_stock', 'created_by', 'unit_display',
@@ -451,6 +453,20 @@ class ProductSerializer(StoreSerializerMixin, serializers.ModelSerializer):
                 code='negative_price'
             )
         return round(value, 2)
+    
+    def get_batch_attributes(self, obj):
+        """Получить все атрибуты из всех партий товара"""
+        attributes = []
+        for batch in obj.batches.all():
+            for batch_attr in batch.attributes.all():
+                attributes.append({
+                    'batch_id': batch.id,
+                    'attribute_type': batch_attr.product_attribute.attribute_value.attribute_type.name,
+                    'attribute_value': batch_attr.product_attribute.attribute_value.value,
+                    'attribute_value_id': batch_attr.product_attribute.attribute_value.id,
+                    'quantity': float(batch_attr.quantity)
+                })
+        return attributes
 
     def validate_barcode(self, value):
         if not value:
@@ -572,171 +588,170 @@ class StockSerializer(serializers.ModelSerializer):
 
 class ProductMultiSizeCreateSerializer(serializers.Serializer):
     """
-    ОБНОВЛЕННЫЙ сериализатор для создания товаров с размерами
+    Сериализатор для создания товаров с размерами и батчами с атрибутами
     """
     name = serializers.CharField(max_length=255)
     category = serializers.PrimaryKeyRelatedField(queryset=ProductCategory.objects.all())
     sale_price = serializers.DecimalField(max_digits=12, decimal_places=2)
-    unit_type = serializers.ChoiceField(
-        choices=Product.SYSTEM_UNITS,
-        required=False,
-        allow_null=True
-    )
-    custom_unit_id = serializers.PrimaryKeyRelatedField(
-        queryset=CustomUnit.objects.all(),
-        required=False,
-        allow_null=True
-    )
-    batch_info = serializers.ListField(
-        child=serializers.DictField(),
-        required=False,
-        allow_empty=True
-    )
+    unit_type = serializers.ChoiceField(choices=Product.SYSTEM_UNITS, required=False, allow_null=True)
+    custom_unit_id = serializers.PrimaryKeyRelatedField(queryset=CustomUnit.objects.all(), required=False, allow_null=True)
+    batch_info = serializers.ListField(child=serializers.DictField(), required=True)
+    batch_attributes = serializers.SerializerMethodField()
 
     def validate(self, attrs):
-        """Валидация единиц измерения"""
         unit_type = attrs.get('unit_type')
         custom_unit_id = attrs.get('custom_unit_id')
 
-        # Должна быть указана единица измерения
         if not unit_type and not custom_unit_id:
-            raise serializers.ValidationError(
-                "Укажите единицу измерения (системную или пользовательскую)"
-            )
-
+            raise serializers.ValidationError("Укажите единицу измерения (системную или пользовательскую)")
         if unit_type and custom_unit_id:
-            raise serializers.ValidationError(
-                "Выберите либо системную, либо пользовательскую единицу"
-            )
-
+            raise serializers.ValidationError("Выберите либо системную, либо пользовательскую единицу")
         return attrs
 
     def validate_batch_info(self, value):
-        """Валидация batch_info"""
         if not value:
-            return value
-
+            raise serializers.ValidationError("batch_info обязателен")
+        
         for batch in value:
             required_fields = ['size_id', 'quantity', 'purchase_price', 'supplier']
             for field in required_fields:
                 if field not in batch:
                     raise serializers.ValidationError(f"Поле '{field}' обязательно для batch_info")
 
-            try:
-                SizeInfo.objects.get(id=batch['size_id'])
-            except SizeInfo.DoesNotExist:
-                raise serializers.ValidationError(f"Размер с ID {batch['size_id']} не найден")
-
             if batch['quantity'] <= 0:
                 raise serializers.ValidationError("Количество должно быть больше нуля")
+            if batch['purchase_price'] < 0:
+                raise serializers.ValidationError("Цена закупки должна быть >= 0")
+
+            # ✅ НОВАЯ ПРОВЕРКА: уникальность attribute_value_id в рамках одного batch
+            attributes = batch.get('attributes', [])
+            if attributes:
+                attr_ids = [attr['attribute_value_id'] for attr in attributes]
+                if len(attr_ids) != len(set(attr_ids)):
+                    raise serializers.ValidationError(
+                        "В одной партии не может быть повторяющихся атрибутов. "
+                        "Если нужно указать разные количества одного атрибута - суммируйте их."
+                    )
+
+            # Проверка атрибутов только на структуру и числа
+            for attr in attributes:
+                if 'attribute_value_id' not in attr or 'quantity' not in attr:
+                    raise serializers.ValidationError("Каждый атрибут должен содержать attribute_value_id и quantity")
+                if attr['quantity'] <= 0:
+                    raise serializers.ValidationError("Количество атрибута должно быть > 0")
+
+                if not AttributeValue.objects.filter(id=attr['attribute_value_id']).exists():
+                    raise serializers.ValidationError(f"Атрибут с ID {attr['attribute_value_id']} не найден")
+
+            # Проверка, что сумма атрибутов ≤ quantity партии
+            total_attr_qty = sum([Decimal(attr['quantity']) for attr in attributes])
+            if total_attr_qty > Decimal(batch['quantity']):
+                raise serializers.ValidationError("Сумма количеств атрибутов не может превышать quantity партии")
 
         return value
 
     def create(self, validated_data):
-        """Создание множественных товаров с новой системой единиц"""
         store = validated_data.get('store')
         created_by = validated_data.get('created_by')
 
-        if not store:
-            raise serializers.ValidationError("Store is required")
-        if not created_by:
-            raise serializers.ValidationError("created_by is required")
+        if not store or not created_by:
+            raise serializers.ValidationError("store и created_by обязательны")
 
         batch_info = validated_data.get('batch_info', [])
-
-        if not batch_info:
-            raise serializers.ValidationError("batch_info с размерами обязателен")
-
         created_products = []
-        size_ids = list(set(batch['size_id'] for batch in batch_info))
 
         try:
             with transaction.atomic():
-                for size_id in size_ids:
-                    try:
-                        size_instance = SizeInfo.objects.get(id=size_id)
-                        product_name = f"{validated_data['name']} - {size_instance.size}"
-                        unique_barcode = self.generate_unique_barcode(store)
+                for batch_data in batch_info:
+                    size_instance = SizeInfo.objects.get(id=batch_data['size_id'])
+                    product_name = f"{validated_data['name']} - {size_instance.size}"
+                    unique_barcode = self.generate_unique_barcode(store)
 
-                        # Подготавливаем данные для создания товара
-                        product_data = {
-                            'name': product_name,
-                            'barcode': unique_barcode,
-                            'created_by': created_by,
-                            'category': validated_data['category'],
-                            'sale_price': validated_data['sale_price'],
-                            'store': store,
-                            'has_sizes': True,
-                            'default_size': size_instance
-                        }
+                    # Создание продукта
+                    product_data = {
+                        'name': product_name,
+                        'barcode': unique_barcode,
+                        'created_by': created_by,
+                        'category': validated_data['category'],
+                        'sale_price': validated_data['sale_price'],
+                        'store': store,
+                        'has_sizes': True,
+                        'default_size': size_instance,
+                    }
+                    if validated_data.get('unit_type'):
+                        product_data['unit_type'] = validated_data['unit_type']
+                    elif validated_data.get('custom_unit_id'):
+                        product_data['custom_unit'] = validated_data['custom_unit_id']
 
-                        # Устанавливаем единицу измерения
-                        if validated_data.get('unit_type'):
-                            product_data['unit_type'] = validated_data['unit_type']
-                        elif validated_data.get('custom_unit_id'):
-                            product_data['custom_unit'] = validated_data['custom_unit_id']
+                    product = Product.objects.create(**product_data)
 
-                        # Создаем товар
-                        product = Product.objects.create(**product_data)
+                    # Создание Stock
+                    Stock.objects.get_or_create(product=product, defaults={'store': store, 'quantity': 0})
 
-                        # Создаем Stock
-                        Stock.objects.get_or_create(
+                    # Создание ProductBatch
+                    batch = ProductBatch.objects.create(
+                        product=product,
+                        store=store,
+                        size=size_instance,
+                        quantity=batch_data['quantity'],
+                        purchase_price=batch_data['purchase_price'],
+                        supplier=batch_data['supplier'],
+                        expiration_date=batch_data.get('expiration_date')
+                    )
+
+                    # Создание ProductBatchAttribute
+                    attributes = batch_data.get('attributes', [])
+
+                    # ✅ Группируем атрибуты по attribute_value_id и суммируем количества
+                    from collections import defaultdict
+                    grouped_attributes = defaultdict(int)
+
+                    for attr in attributes:
+                        attr_value_id = attr['attribute_value_id']
+                        quantity = attr['quantity']
+                        grouped_attributes[attr_value_id] += quantity
+
+                    # Создаем ProductBatchAttribute для каждого уникального атрибута
+                    for attr_value_id, total_quantity in grouped_attributes.items():
+                        # Создаем ProductAttribute для конкретного товара (если ещё нет)
+                        prod_attr, created = ProductAttribute.objects.get_or_create(
                             product=product,
-                            defaults={'store': store, 'quantity': 0}
+                            attribute_value_id=attr_value_id
                         )
 
-                        # Создаем batch
-                        batch_for_size = next((b for b in batch_info if b['size_id'] == size_id), None)
-                        if batch_for_size:
-                            batch = ProductBatch.objects.create(
-                                product=product,
-                                store=store,
-                                size=size_instance,
-                                quantity=batch_for_size['quantity'],
-                                purchase_price=batch_for_size['purchase_price'],
-                                supplier=batch_for_size['supplier'],
-                                expiration_date=batch_for_size.get('expiration_date')
-                            )
+                        ProductBatchAttribute.objects.create(
+                            batch=batch,
+                            product_attribute=prod_attr,
+                            quantity=total_quantity,
+                            store=store
+                        )
 
-                            product.stock.update_quantity()
-
-                        created_products.append(product)
-
-                    except SizeInfo.DoesNotExist:
-                        logger.error(f"Size with ID {size_id} not found")
-                        raise serializers.ValidationError(f"Размер с ID {size_id} не найден")
+                    # Обновление Stock
+                    product.stock.update_quantity()
+                    created_products.append(product)
 
         except Exception as e:
-            logger.error(f"Transaction failed in multi-size creation: {str(e)}")
+            logger.error(f"Ошибка создания товаров с батчами и атрибутами: {str(e)}")
             raise
 
         return created_products
 
     def generate_unique_barcode(self, store):
-        """Генерирует уникальный штрих-код для конкретного магазина"""
-        import uuid
-        import random
-        import time
-
+        import random, time, uuid
         max_attempts = 100
         attempts = 0
-
         while attempts < max_attempts:
             timestamp = str(int(time.time()))[-6:]
             random_part = str(random.randint(100000, 999999))
-            barcode_code = timestamp + random_part
-            checksum = self._calculate_ean13_checksum(barcode_code)
-            full_barcode = barcode_code + checksum
-
+            code = timestamp + random_part
+            checksum = self._calculate_ean13_checksum(code)
+            full_barcode = code + checksum
             if not Product.objects.filter(store=store, barcode=full_barcode).exists():
                 return full_barcode
-
             attempts += 1
-
         return str(uuid.uuid4().int)[:12]
 
     def _calculate_ean13_checksum(self, digits):
-        """Вычисляет контрольную цифру EAN-13"""
         weights = [1, 3] * 6
         total = sum(int(d) * w for d, w in zip(digits, weights))
         return str((10 - (total % 10)) % 10)

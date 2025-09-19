@@ -1,1477 +1,1463 @@
 {
-  "info": {
-    "name": "SomPOS API - Full Collection",
-    "description": "Полная коллекция для тестирования всех эндпойнтов SomPOS с мультитенантностью магазинов",
-    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "_postman_id": "sompos-api-collection",
-    "version": {
-      "major": 1,
-      "minor": 0,
-      "patch": 0
-    }
-  },
-  "auth": {
-    "type": "bearer",
-    "bearer": [
-      {
-        "key": "token",
-        "value": "{{access_token}}",
-        "type": "string"
-      }
-    ]
-  },
-  "event": [
-    {
-      "listen": "prerequest",
-      "script": {
-        "type": "text/javascript",
-        "exec": [
-          ""
-        ]
-      }
-    },
-    {
-      "listen": "test",
-      "script": {
-        "type": "text/javascript",
-        "exec": [
-          ""
-        ]
-      }
-    }
-  ],
-  "variable": [
-    {
-      "key": "base_url",
-      "value": "http://127.0.0.1:8000",
-      "type": "string"
-    },
-    {
-      "key": "access_token",
-      "value": "",
-      "type": "string"
-    },
-    {
-      "key": "refresh_token",
-      "value": "",
-      "type": "string"
-    },
-    {
-      "key": "store_id",
-      "value": "",
-      "type": "string"
-    },
-    {
-      "key": "user_id",
-      "value": "",
-      "type": "string"
-    },
-    {
-      "key": "product_id",
-      "value": "",
-      "type": "string"
-    },
-    {
-      "key": "customer_id",
-      "value": "",
-      "type": "string"
-    },
-    {
-      "key": "category_id",
-      "value": "",
-      "type": "string"
-    }
-  ],
-  "item": [
-    {
-      "name": "🏪 Store Management",
-      "item": [
-        {
-          "name": "Debug URLs",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/stores/debug/",
-              "host": ["{{base_url}}"],
-              "path": ["api", "stores", "debug", ""]
-            },
-            "description": "Проверка доступности эндпойнтов магазинов"
-          }
-        },
-        {
-          "name": "Register Store & Admin",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "if (pm.response.code === 201) {",
-                  "    var jsonData = pm.response.json();",
-                  "    pm.environment.set('access_token', jsonData.tokens.access);",
-                  "    pm.environment.set('refresh_token', jsonData.tokens.refresh);",
-                  "    pm.environment.set('store_id', jsonData.store.id);",
-                  "    pm.environment.set('user_id', jsonData.user.id);",
-                  "    console.log('Store registered successfully!');",
-                  "    console.log('Store ID:', jsonData.store.id);",
-                  "    console.log('Access token saved');",
-                  "}"
-                ],
-                "type": "text/javascript"
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"username\": \"testadmin\",\n  \"password\": \"secure123\",\n  \"email\": \"admin@teststore.com\",\n  \"first_name\": \"Test\",\n  \"last_name\": \"Admin\",\n  \"phone\": \"+998901234567\",\n  \"store_name\": \"Test Store\",\n  \"store_address\": \"123 Test Street, Tashkent\",\n  \"store_phone\": \"+998901234568\",\n  \"store_email\": \"store@teststore.com\",\n  \"store_description\": \"Test store for API testing\"\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/api/stores/register/",
-              "host": ["{{base_url}}"],
-              "path": ["api", "stores", "register", ""]
-            },
-            "description": "Регистрация магазина и администратора"
-          }
-        },
-        {
-          "name": "Login to Store",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "if (pm.response.code === 200) {",
-                  "    var jsonData = pm.response.json();",
-                  "    pm.environment.set('access_token', jsonData.access);",
-                  "    pm.environment.set('refresh_token', jsonData.refresh);",
-                  "    if (jsonData.current_store) {",
-                  "        pm.environment.set('store_id', jsonData.current_store.id);",
-                  "    }",
-                  "    pm.environment.set('user_id', jsonData.user.id);",
-                  "    console.log('Login successful!');",
-                  "}"
-                ],
-                "type": "text/javascript"
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"username\": \"testadmin\",\n  \"password\": \"secure123\"\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/users/login/",
-              "host": ["{{base_url}}"],
-              "path": ["users", "login", ""]
-            },
-            "description": "Вход в систему"
-          }
-        },
-        {
-          "name": "Get My Stores",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/api/stores/",
-              "host": ["{{base_url}}"],
-              "path": ["api", "stores", ""]
-            },
-            "description": "Получить список доступных магазинов"
-          }
-        },
-        {
-          "name": "Create Store Employee",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"username\": \"cashier1\",\n  \"password\": \"cashier123\",\n  \"email\": \"cashier@teststore.com\",\n  \"first_name\": \"John\",\n  \"last_name\": \"Cashier\",\n  \"phone\": \"+998901234569\",\n  \"store_role\": \"cashier\"\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/api/stores/create-user/",
-              "host": ["{{base_url}}"],
-              "path": ["api", "stores", "create-user", ""]
-            },
-            "description": "Создать сотрудника для магазина"
-          }
-        },
-        {
-          "name": "Refresh Token",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "if (pm.response.code === 200) {",
-                  "    var jsonData = pm.response.json();",
-                  "    pm.environment.set('access_token', jsonData.access);",
-                  "    console.log('Token refreshed successfully');",
-                  "}"
-                ],
-                "type": "text/javascript"
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"refresh\": \"{{refresh_token}}\"\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/api/stores/refresh-token/",
-              "host": ["{{base_url}}"],
-              "path": ["api", "stores", "refresh-token", ""]
-            },
-            "description": "Обновить access token"
-          }
-        }
-      ]
-    },
-    {
-      "name": "📦 Inventory Management",
-      "item": [
-        {
-          "name": "Categories",
-          "item": [
-            {
-              "name": "Create Category",
-              "event": [
-                {
-                  "listen": "test",
-                  "script": {
-                    "exec": [
-                      "if (pm.response.code === 201) {",
-                      "    var jsonData = pm.response.json();",
-                      "    pm.environment.set('category_id', jsonData.id);",
-                      "    console.log('Category created with ID:', jsonData.id);",
-                      "}"
-                    ],
-                    "type": "text/javascript"
-                  }
-                }
-              ],
-              "request": {
-                "method": "POST",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{access_token}}"
-                  },
-                  {
-                    "key": "Content-Type",
-                    "value": "application/json"
-                  }
-                ],
-                "body": {
-                  "mode": "raw",
-                  "raw": "{\n  \"name\": \"Одежда\"\n}"
-                },
-                "url": {
-                  "raw": "{{base_url}}/inventory/categories/",
-                  "host": ["{{base_url}}"],
-                  "path": ["inventory", "categories", ""]
-                }
-              }
-            },
-            {
-              "name": "Get Categories",
-              "request": {
-                "method": "GET",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{access_token}}"
-                  }
-                ],
-                "url": {
-                  "raw": "{{base_url}}/inventory/categories/",
-                  "host": ["{{base_url}}"],
-                  "path": ["inventory", "categories", ""]
-                }
-              }
-            }
-          ]
-        },
-        {
-          "name": "Attributes",
-          "item": [
-            {
-              "name": "Create Attribute Type - Brand",
-              "request": {
-                "method": "POST",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{access_token}}"
-                  },
-                  {
-                    "key": "Content-Type",
-                    "value": "application/json"
-                  }
-                ],
-                "body": {
-                  "mode": "raw",
-                  "raw": "{\n  \"name\": \"Бренд\",\n  \"slug\": \"brand\",\n  \"is_filterable\": true\n}"
-                },
-                "url": {
-                  "raw": "{{base_url}}/inventory/attribute-types/",
-                  "host": ["{{base_url}}"],
-                  "path": ["inventory", "attribute-types", ""]
-                }
-              }
-            },
-            {
-              "name": "Create Attribute Value - Nike",
-              "request": {
-                "method": "POST",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{access_token}}"
-                  },
-                  {
-                    "key": "Content-Type",
-                    "value": "application/json"
-                  }
-                ],
-                "body": {
-                  "mode": "raw",
-                  "raw": "{\n  \"attribute_type\": 1,\n  \"value\": \"Nike\",\n  \"slug\": \"nike\",\n  \"ordering\": 1\n}"
-                },
-                "url": {
-                  "raw": "{{base_url}}/inventory/attribute-values/",
-                  "host": ["{{base_url}}"],
-                  "path": ["inventory", "attribute-values", ""]
-                }
-              }
-            },
-            {
-              "name": "Get Available Attributes for Products",
-              "request": {
-                "method": "GET",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{access_token}}"
-                  }
-                ],
-                "url": {
-                  "raw": "{{base_url}}/inventory/attribute-types/for_product_creation/",
-                  "host": ["{{base_url}}"],
-                  "path": ["inventory", "attribute-types", "for_product_creation", ""]
-                }
-              }
-            }
-          ]
-        },
-        {
-          "name": "Size Information",
-          "item": [
-            {
-              "name": "Create Size Info - S",
-              "request": {
-                "method": "POST",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{access_token}}"
-                  },
-                  {
-                    "key": "Content-Type",
-                    "value": "application/json"
-                  }
-                ],
-                "body": {
-                  "mode": "raw",
-                  "raw": "{\n  \"size\": \"S\",\n  \"chest\": 90,\n  \"waist\": 70,\n  \"length\": 60\n}"
-                },
-                "url": {
-                  "raw": "{{base_url}}/inventory/size-info/",
-                  "host": ["{{base_url}}"],
-                  "path": ["inventory", "size-info", ""]
-                }
-              }
-            },
-            {
-              "name": "Create Size Info - M",
-              "request": {
-                "method": "POST",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{access_token}}"
-                  },
-                  {
-                    "key": "Content-Type",
-                    "value": "application/json"
-                  }
-                ],
-                "body": {
-                  "mode": "raw",
-                  "raw": "{\n  \"size\": \"M\",\n  \"chest\": 95,\n  \"waist\": 75,\n  \"length\": 65\n}"
-                },
-                "url": {
-                  "raw": "{{base_url}}/inventory/size-info/",
-                  "host": ["{{base_url}}"],
-                  "path": ["inventory", "size-info", ""]
-                }
-              }
-            },
-            {
-              "name": "Get All Size Info",
-              "request": {
-                "method": "GET",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{access_token}}"
-                  }
-                ],
-                "url": {
-                  "raw": "{{base_url}}/inventory/size-info/",
-                  "host": ["{{base_url}}"],
-                  "path": ["inventory", "size-info", ""]
-                }
-              }
-            },
-            {
-              "name": "Get Available Sizes for Products",
-              "request": {
-                "method": "GET",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{access_token}}"
-                  }
-                ],
-                "url": {
-                  "raw": "{{base_url}}/inventory/products/available_sizes/",
-                  "host": ["{{base_url}}"],
-                  "path": ["inventory", "products", "available_sizes", ""]
-                }
-              }
-            }
-          ]
-        },
-        {
-          "name": "Products",
-          "item": [
-            {
-              "name": "Create Single Product with Batch",
-              "event": [
-                {
-                  "listen": "test",
-                  "script": {
-                    "exec": [
-                      "if (pm.response.code === 201) {",
-                      "    var jsonData = pm.response.json();",
-                      "    pm.environment.set('product_id', jsonData.product.id);",
-                      "    console.log('Product created with ID:', jsonData.product.id);",
-                      "}"
-                    ],
-                    "type": "text/javascript"
-                  }
-                }
-              ],
-              "request": {
-                "method": "POST",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{access_token}}"
-                  },
-                  {
-                    "key": "Content-Type",
-                    "value": "application/json"
-                  }
-                ],
-                "body": {
-                  "mode": "raw",
-                  "raw": "{\n  \"name\": \"Nike Футболка\",\n  \"category\": {{category_id}},\n  \"sale_price\": 75000.00,\n  \"size_id\": 1,\n  \"batch_info\": {\n    \"quantity\": 20,\n    \"purchase_price\": 50000.00,\n    \"supplier\": \"Nike Официальный\",\n    \"expiration_date\": null\n  }\n}"
-                },
-                "url": {
-                  "raw": "{{base_url}}/inventory/products/",
-                  "host": ["{{base_url}}"],
-                  "path": ["inventory", "products", ""]
-                }
-              }
-            },
-            {
-              "name": "Create Multi-Size Product",
-              "request": {
-                "method": "POST",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{access_token}}"
-                  },
-                  {
-                    "key": "Content-Type",
-                    "value": "application/json"
-                  }
-                ],
-                "body": {
-                  "mode": "raw",
-                  "raw": "{\n  \"name\": \"Adidas Футболка\",\n  \"category\": {{category_id}},\n  \"sale_price\": 85000.00,\n  \"unit\": \"piece\",\n  \"batch_info\": [\n    {\n      \"size_id\": 1,\n      \"quantity\": 15,\n      \"purchase_price\": 55000.00,\n      \"supplier\": \"Adidas Официальный\",\n      \"expiration_date\": null\n    },\n    {\n      \"size_id\": 2,\n      \"quantity\": 25,\n      \"purchase_price\": 55000.00,\n      \"supplier\": \"Adidas Официальный\",\n      \"expiration_date\": null\n    }\n  ]\n}"
-                },
-                "url": {
-                  "raw": "{{base_url}}/inventory/products/create_multi_size/",
-                  "host": ["{{base_url}}"],
-                  "path": ["inventory", "products", "create_multi_size", ""]
-                }
-              }
-            },
-            {
-              "name": "Get Products",
-              "request": {
-                "method": "GET",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{access_token}}"
-                  }
-                ],
-                "url": {
-                  "raw": "{{base_url}}/inventory/products/",
-                  "host": ["{{base_url}}"],
-                  "path": ["inventory", "products", ""]
-                }
-              }
-            },
-            {
-              "name": "Scan Product by Barcode",
-              "request": {
-                "method": "GET",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{access_token}}"
-                  }
-                ],
-                "url": {
-                  "raw": "{{base_url}}/inventory/products/scan_barcode/?barcode=123456789012",
-                  "host": ["{{base_url}}"],
-                  "path": ["inventory", "products", "scan_barcode", ""],
-                  "query": [
-                    {
-                      "key": "barcode",
-                      "value": "123456789012"
-                    }
-                  ]
-                }
-              }
-            },
-            {
-              "name": "Get Products with Low Stock",
-              "request": {
-                "method": "GET",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{access_token}}"
-                  }
-                ],
-                "url": {
-                  "raw": "{{base_url}}/inventory/products/low_stock/?min_quantity=10",
-                  "host": ["{{base_url}}"],
-                  "path": ["inventory", "products", "low_stock", ""],
-                  "query": [
-                    {
-                      "key": "min_quantity",
-                      "value": "10"
-                    }
-                  ]
-                }
-              }
-            },
-            {
-              "name": "Get Product Label",
-              "request": {
-                "method": "GET",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{access_token}}"
-                  }
-                ],
-                "url": {
-                  "raw": "{{base_url}}/inventory/products/{{product_id}}/label/",
-                  "host": ["{{base_url}}"],
-                  "path": ["inventory", "products", "{{product_id}}", "label", ""]
-                }
-              }
-            }
-          ]
-        },
-        {
-          "name": "Stock Management",
-          "item": [
-            {
-              "name": "Get Stock Summary",
-              "request": {
-                "method": "GET",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{access_token}}"
-                  }
-                ],
-                "url": {
-                  "raw": "{{base_url}}/inventory/stock/summary/",
-                  "host": ["{{base_url}}"],
-                  "path": ["inventory", "stock", "summary", ""]
-                }
-              }
-            },
-            {
-              "name": "Get All Stock",
-              "request": {
-                "method": "GET",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{access_token}}"
-                  }
-                ],
-                "url": {
-                  "raw": "{{base_url}}/inventory/stock/",
-                  "host": ["{{base_url}}"],
-                  "path": ["inventory", "stock", ""]
-                }
-              }
-            },
-            {
-              "name": "Adjust Stock",
-              "request": {
-                "method": "POST",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{access_token}}"
-                  },
-                  {
-                    "key": "Content-Type",
-                    "value": "application/json"
-                  }
-                ],
-                "body": {
-                  "mode": "raw",
-                  "raw": "{\n  \"quantity\": 50,\n  \"reason\": \"Инвентаризация\"\n}"
-                },
-                "url": {
-                  "raw": "{{base_url}}/inventory/stock/1/adjust/",
-                  "host": ["{{base_url}}"],
-                  "path": ["inventory", "stock", "1", "adjust", ""]
-                }
-              }
-            }
-          ]
-        },
-        {
-          "name": "Batches",
-          "item": [
-            {
-              "name": "Get All Batches",
-              "request": {
-                "method": "GET",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{access_token}}"
-                  }
-                ],
-                "url": {
-                  "raw": "{{base_url}}/inventory/batches/",
-                  "host": ["{{base_url}}"],
-                  "path": ["inventory", "batches", ""]
-                }
-              }
-            },
-            {
-              "name": "Get Expiring Batches",
-              "request": {
-                "method": "GET",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{access_token}}"
-                  }
-                ],
-                "url": {
-                  "raw": "{{base_url}}/inventory/batches/expiring_soon/?days=30",
-                  "host": ["{{base_url}}"],
-                  "path": ["inventory", "batches", "expiring_soon", ""],
-                  "query": [
-                    {
-                      "key": "days",
-                      "value": "30"
-                    }
-                  ]
-                }
-              }
-            }
-          ]
-        },
-        {
-          "name": "Inventory Stats",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/inventory/stats/",
-              "host": ["{{base_url}}"],
-              "path": ["inventory", "stats", ""]
-            }
-          }
-        }
-      ]
-    },
-    {
-      "name": "👥 Customer Management",
-      "item": [
-        {
-          "name": "Create Customer",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "if (pm.response.code === 201) {",
-                  "    var jsonData = pm.response.json();",
-                  "    pm.environment.set('customer_id', jsonData.id);",
-                  "    console.log('Customer created with ID:', jsonData.id);",
-                  "}"
-                ],
-                "type": "text/javascript"
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"full_name\": \"Иван Петров\",\n  \"phone\": \"+998901234570\",\n  \"debt\": 0\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/customers/",
-              "host": ["{{base_url}}"],
-              "path": ["customers", ""]
-            }
-          }
-        },
-        {
-          "name": "Get All Customers",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/customers/",
-              "host": ["{{base_url}}"],
-              "path": ["customers", ""]
-            }
-          }
-        },
-        {
-          "name": "Search Customers",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/customers/?q=Иван",
-              "host": ["{{base_url}}"],
-              "path": ["customers", ""],
-              "query": [
-                {
-                  "key": "q",
-                  "value": "Иван"
-                }
-              ]
-            }
-          }
-        },
-        {
-          "name": "Get Customer by ID",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/customers/{{customer_id}}/",
-              "host": ["{{base_url}}"],
-              "path": ["customers", "{{customer_id}}", ""]
-            }
-          }
-        },
-        {
-          "name": "Update Customer",
-          "request": {
-            "method": "PATCH",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"debt\": 50000.00\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/customers/{{customer_id}}/",
-              "host": ["{{base_url}}"],
-              "path": ["customers", "{{customer_id}}", ""]
-            }
-          }
-        }
-      ]
-    },
-    {
-      "name": "💰 Sales Management",
-      "item": [
-        {
-          "name": "Create Cash Sale",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"payment_method\": \"cash\",\n  \"items\": [\n    {\n      \"product_id\": {{product_id}},\n      \"quantity\": 2,\n      \"price\": 75000.00\n    }\n  ]\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/sales/transactions/",
-              "host": ["{{base_url}}"],
-              "path": ["sales", "transactions", ""]
-            }
-          }
-        },
-        {
-          "name": "Create Credit Sale with New Customer",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"payment_method\": \"debt\",\n  \"new_customer\": {\n    \"full_name\": \"Мария Сидорова\",\n    \"phone\": \"+998901234571\"\n  },\n  \"items\": [\n    {\n      \"product_id\": {{product_id}},\n      \"quantity\": 1,\n      \"price\": 75000.00\n    }\n  ]\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/sales/transactions/",
-              "host": ["{{base_url}}"],
-              "path": ["sales", "transactions", ""]
-            }
-          }
-        },
-        {
-          "name": "Create Credit Sale with Existing Customer",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"payment_method\": \"debt\",\n  \"customer\": {{customer_id}},\n  \"items\": [\n    {\n      \"product_id\": {{product_id}},\n      \"quantity\": 1,\n      \"price\": 75000.00\n    }\n  ]\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/sales/transactions/",
-              "host": ["{{base_url}}"],
-              "path": ["sales", "transactions", ""]
-            }
-          }
-        },
-        {
-          "name": "Get All Transactions",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/sales/transactions/",
-              "host": ["{{base_url}}"],
-              "path": ["sales", "transactions", ""]
-            }
-          }
-        },
-        {
-          "name": "Get Transaction History",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/sales/transaction-history/?limit=10",
-              "host": ["{{base_url}}"],
-              "path": ["sales", "transaction-history", ""],
-              "query": [
-                {
-                  "key": "limit",
-                  "value": "10"
-                }
-              ]
-            }
-          }
-        },
-        {
-          "name": "Get Cashier Sales Summary",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/sales/cashier-summary/",
-              "host": ["{{base_url}}"],
-              "path": ["sales", "cashier-summary", ""]
-            }
-          }
-        }
-      ]
-    },
-    {
-      "name": "📊 Analytics",
-      "item": [
-        {
-          "name": "Financial Summary",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/analytics/sales/financial_summary/?start_date=2025-01-01&end_date=2025-12-31",
-              "host": ["{{base_url}}"],
-              "path": ["analytics", "sales", "financial_summary", ""],
-              "query": [
-                {
-                  "key": "start_date",
-                  "value": "2025-01-01"
-                },
-                {
-                  "key": "end_date",
-                  "value": "2025-12-31"
-                }
-              ]
-            }
-          }
-        },
-        {
-          "name": "Sales Summary",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/analytics/sales/summary/?start_date=2025-01-01",
-              "host": ["{{base_url}}"],
-              "path": ["analytics", "sales", "summary", ""],
-              "query": [
-                {
-                  "key": "start_date",
-                  "value": "2025-01-01"
-                }
-              ]
-            }
-          }
-        },
-        {
-          "name": "Purchases Detail",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/analytics/sales/purchases_detail/?start_date=2025-01-01",
-              "host": ["{{base_url}}"],
-              "path": ["analytics", "sales", "purchases_detail", ""],
-              "query": [
-                {
-                  "key": "start_date",
-                  "value": "2025-01-01"
-                }
-              ]
-            }
-          }
-        },
-        {
-          "name": "Top Products",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/analytics/products/top_products/?limit=5&start_date=2025-01-01",
-              "host": ["{{base_url}}"],
-              "path": ["analytics", "products", "top_products", ""],
-              "query": [
-                {
-                  "key": "limit",
-                  "value": "5"
-                },
-                {
-                  "key": "start_date",
-                  "value": "2025-01-01"
-                }
-              ]
-            }
-          }
-        },
-        {
-          "name": "Top Customers",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/analytics/customers/top_customers/?limit=5&start_date=2025-01-01",
-              "host": ["{{base_url}}"],
-              "path": ["analytics", "customers", "top_customers", ""],
-              "query": [
-                {
-                  "key": "limit",
-                  "value": "5"
-                },
-                {
-                  "key": "start_date",
-                  "value": "2025-01-01"
-                }
-              ]
-            }
-          }
-        },
-        {
-          "name": "Transactions by Day",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/analytics/transactions-by-day/?date_from=2025-01-01&date_to=2025-01-31",
-              "host": ["{{base_url}}"],
-              "path": ["analytics", "transactions-by-day", ""],
-              "query": [
-                {
-                  "key": "date_from",
-                  "value": "2025-01-01"
-                },
-                {
-                  "key": "date_to",
-                  "value": "2025-01-31"
-                }
-              ]
-            }
-          }
-        }
-      ]
-    },
-    {
-      "name": "📱 SMS Management",
-      "item": [
-        {
-          "name": "Create SMS Template",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"name\": \"Напоминание о долге\",\n  \"content\": \"Здравствуйте, @! Напоминаем о задолженности: $ сум. Просим погасить долг. Спасибо!\"\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/sms/",
-              "host": ["{{base_url}}"],
-              "path": ["sms", ""]
-            }
-          }
-        },
-        {
-          "name": "Get SMS Templates",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/sms/",
-              "host": ["{{base_url}}"],
-              "path": ["sms", ""]
-            }
-          }
-        },
-        {
-          "name": "Preview Template",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/sms/preview/1/?customer_id={{customer_id}}",
-              "host": ["{{base_url}}"],
-              "path": ["sms", "preview", "1", ""],
-              "query": [
-                {
-                  "key": "customer_id",
-                  "value": "{{customer_id}}"
-                }
-              ]
-            }
-          }
-        },
-        {
-          "name": "Send SMS to Specific Customer",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"customer_ids\": [{{customer_id}}],\n  \"template_id\": 1\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/sms/send-sms/",
-              "host": ["{{base_url}}"],
-              "path": ["sms", "send-sms", ""]
-            }
-          }
-        },
-        {
-          "name": "Send Custom SMS",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"phone\": \"+998901234570\",\n  \"text\": \"Тестовое сообщение из Postman\"\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/sms/send-sms/",
-              "host": ["{{base_url}}"],
-              "path": ["sms", "send-sms", ""]
-            }
-          }
-        },
-        {
-          "name": "Send SMS to All Customers with Debt",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"template_id\": 1\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/sms/send-sms/",
-              "host": ["{{base_url}}"],
-              "path": ["sms", "send-sms", ""]
-            }
-          }
-        }
-      ]
-    },
-    {
-      "name": "👤 User Management",
-      "item": [
-        {
-          "name": "Get User Profile",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/users/profile/",
-              "host": ["{{base_url}}"],
-              "path": ["users", "profile", ""]
-            }
-          }
-        },
-        {
-          "name": "Get All Users",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/users/users/",
-              "host": ["{{base_url}}"],
-              "path": ["users", "users", ""]
-            }
-          }
-        },
-        {
-          "name": "Search Users by Name",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/users/users/?name=Test",
-              "host": ["{{base_url}}"],
-              "path": ["users", "users", ""],
-              "query": [
-                {
-                  "key": "name",
-                  "value": "Test"
-                }
-              ]
-            }
-          }
-        },
-        {
-          "name": "Update Profile",
-          "request": {
-            "method": "PATCH",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"first_name\": \"Updated\",\n  \"last_name\": \"Name\"\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/users/profile-update/",
-              "host": ["{{base_url}}"],
-              "path": ["users", "profile-update", ""]
-            }
-          }
-        }
-      ]
-    },
-    {
-      "name": "🔧 System Tests",
-      "item": [
-        {
-          "name": "Swagger Documentation",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/swagger/",
-              "host": ["{{base_url}}"],
-              "path": ["swagger", ""]
-            },
-            "description": "Открыть Swagger UI в браузере"
-          }
-        },
-        {
-          "name": "API Schema JSON",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/swagger.json",
-              "host": ["{{base_url}}"],
-              "path": ["swagger.json"]
-            }
-          }
-        },
-        {
-          "name": "Test Authentication",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{access_token}}"
-              }
-            ],
-            "url": {
-              "raw": "{{base_url}}/users/profile/",
-              "host": ["{{base_url}}"],
-              "path": ["users", "profile", ""]
-            },
-            "description": "Проверить что аутентификация работает"
-          }
-        }
-      ]
-    }
-  ]
+	"info": {
+		"_postman_id": "inventory-system-complete",
+		"name": "Inventory Management System - Complete API",
+		"description": "Полная коллекция API для системы управления магазинами с поддержкой товаров, размеров, единиц измерения, продаж и аналитики",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"auth": {
+		"type": "bearer",
+		"bearer": [
+			{
+				"key": "token",
+				"value": "{{access_token}}",
+				"type": "string"
+			}
+		]
+	},
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:8000/api",
+			"type": "string"
+		},
+		{
+			"key": "access_token",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "refresh_token",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "store_id",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "current_user_id",
+			"value": "",
+			"type": "string"
+		}
+	],
+	"item": [
+		{
+			"name": "🏪 STORE MANAGEMENT",
+			"item": [
+				{
+					"name": "1. Store Registration (без auth)",
+					"request": {
+						"auth": {
+							"type": "noauth"
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"username\": \"testadmin\",\n  \"password\": \"secure123\",\n  \"email\": \"admin@teststore.com\",\n  \"first_name\": \"John\",\n  \"last_name\": \"Doe\",\n  \"phone\": \"+998901234567\",\n  \"store_name\": \"My Test Store\",\n  \"store_address\": \"123 Main Street, Tashkent\",\n  \"store_phone\": \"+998901234568\",\n  \"store_email\": \"store@teststore.com\",\n  \"store_description\": \"Test store for development\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/stores/register/",
+							"host": ["{{base_url}}"],
+							"path": ["stores", "register", ""]
+						}
+					},
+					"response": [],
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.collectionVariables.set('access_token', response.tokens.access);",
+									"    pm.collectionVariables.set('refresh_token', response.tokens.refresh);",
+									"    pm.collectionVariables.set('store_id', response.store.id);",
+									"    pm.collectionVariables.set('current_user_id', response.user.id);",
+									"    console.log('Store registered successfully!');",
+									"    console.log('Store ID:', response.store.id);",
+									"    console.log('Access Token set');",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "2. Login (получить токены)",
+					"request": {
+						"auth": {
+							"type": "noauth"
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"username\": \"testadmin\",\n  \"password\": \"secure123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/users/login/",
+							"host": ["{{base_url}}"],
+							"path": ["users", "login", ""]
+						}
+					},
+					"response": [],
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"    const response = pm.response.json();",
+									"    pm.collectionVariables.set('access_token', response.access);",
+									"    pm.collectionVariables.set('refresh_token', response.refresh);",
+									"    pm.collectionVariables.set('store_id', response.current_store.id);",
+									"    pm.collectionVariables.set('current_user_id', response.user.id);",
+									"    console.log('Login successful!');",
+									"    console.log('Store:', response.current_store.name);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "3. Get Store List",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/stores/",
+							"host": ["{{base_url}}"],
+							"path": ["stores", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "4. Get Current Store",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/stores/current/",
+							"host": ["{{base_url}}"],
+							"path": ["stores", "current", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "5. Create Employee",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"username\": \"cashier1\",\n  \"email\": \"cashier1@teststore.com\",\n  \"password\": \"cashier123\",\n  \"first_name\": \"Jane\",\n  \"last_name\": \"Smith\",\n  \"phone\": \"+998901234569\",\n  \"sex\": \"female\",\n  \"store_role\": \"cashier\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/stores/create-user/",
+							"host": ["{{base_url}}"],
+							"path": ["stores", "create-user", ""]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "👥 USER MANAGEMENT",
+			"item": [
+				{
+					"name": "1. Get User Profile",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/users/profile/",
+							"host": ["{{base_url}}"],
+							"path": ["users", "profile", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "2. Get Store Employees",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/users/users/",
+							"host": ["{{base_url}}"],
+							"path": ["users", "users", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "3. Update Employee",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"first_name\": \"Jane Updated\",\n  \"phone\": \"+998901234570\",\n  \"password\": \"newpassword123\",\n  \"role\": \"manager\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/users/users/{{current_user_id}}/",
+							"host": ["{{base_url}}"],
+							"path": ["users", "users", "{{current_user_id}}", ""]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "📦 INVENTORY - CATEGORIES",
+			"item": [
+				{
+					"name": "1. Create Category",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Сантехника\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/inventory/categories/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "categories", ""]
+						}
+					},
+					"response": [],
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.collectionVariables.set('category_id', response.id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "2. Get Categories",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/inventory/categories/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "categories", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "3. Create More Categories",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Одежда\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/inventory/categories/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "categories", ""]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "📏 INVENTORY - SIZE INFO",
+			"item": [
+				{
+					"name": "1. Create Size Info - Pipes",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"size\": \"1/2\\\"\",\n  \"dimension1\": 15,\n  \"dimension2\": 20,\n  \"dimension3\": 2.5,\n  \"dimension1_label\": \"Внутр. диаметр (мм)\",\n  \"dimension2_label\": \"Внешн. диаметр (мм)\",\n  \"dimension3_label\": \"Толщина стенки (мм)\",\n  \"description\": \"Труба полипропиленовая\",\n  \"sort_order\": 1\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/inventory/size-info/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "size-info", ""]
+						}
+					},
+					"response": [],
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.collectionVariables.set('size_id_half_inch', response.id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "2. Create Size Info - Clothing Sizes",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"size\": \"M\",\n  \"dimension1\": 90,\n  \"dimension2\": 70,\n  \"dimension3\": 65,\n  \"dimension1_label\": \"Обхват груди (см)\",\n  \"dimension2_label\": \"Обхват талии (см)\",\n  \"dimension3_label\": \"Длина (см)\",\n  \"description\": \"Размер M для одежды\",\n  \"sort_order\": 2\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/inventory/size-info/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "size-info", ""]
+						}
+					},
+					"response": [],
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.collectionVariables.set('size_id_m', response.id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "3. Create Size L",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"size\": \"L\",\n  \"dimension1\": 95,\n  \"dimension2\": 75,\n  \"dimension3\": 67,\n  \"dimension1_label\": \"Обхват груди (см)\",\n  \"dimension2_label\": \"Обхват талии (см)\",\n  \"dimension3_label\": \"Длина (см)\",\n  \"description\": \"Размер L для одежды\",\n  \"sort_order\": 3\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/inventory/size-info/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "size-info", ""]
+						}
+					},
+					"response": [],
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.collectionVariables.set('size_id_l', response.id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "4. Get All Sizes",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/inventory/size-info/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "size-info", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "5. Import Standard Pipe Sizes",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"type\": \"pipes\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/inventory/size-info/import_standard_sizes/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "size-info", "import_standard_sizes", ""]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "🛠️ INVENTORY - CUSTOM UNITS",
+			"item": [
+				{
+					"name": "1. Create Custom Unit - Метр погонный",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Метр погонный\",\n  \"short_name\": \"м.п.\",\n  \"allow_decimal\": true,\n  \"min_quantity\": 0.1,\n  \"step\": 0.01\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/inventory/custom-units/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "custom-units", ""]
+						}
+					},
+					"response": [],
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.collectionVariables.set('custom_unit_meter_id', response.id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "2. Get Custom Units Presets",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/inventory/custom-units/presets/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "custom-units", "presets", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "3. Get All Custom Units",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/inventory/custom-units/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "custom-units", ""]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "📦 INVENTORY - PRODUCTS",
+			"item": [
+				{
+					"name": "1. Create Simple Product (system unit)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Болт M8x20\",\n  \"category\": {{category_id}},\n  \"unit_type\": \"piece\",\n  \"sale_price\": 500.00,\n  \"has_sizes\": false,\n  \"batch_info\": {\n    \"quantity\": 100,\n    \"purchase_price\": 300.00,\n    \"supplier\": \"Метизы ООО\",\n    \"expiration_date\": null\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/inventory/products/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "products", ""]
+						}
+					},
+					"response": [],
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.collectionVariables.set('product_bolt_id', response.product.id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "2. Create Product with Custom Unit",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Кабель ВВГ 3х2.5\",\n  \"category\": {{category_id}},\n  \"custom_unit_id\": {{custom_unit_meter_id}},\n  \"sale_price\": 2500.00,\n  \"has_sizes\": false,\n  \"batch_info\": {\n    \"quantity\": 50.5,\n    \"purchase_price\": 1800.00,\n    \"supplier\": \"Электро Торг\",\n    \"expiration_date\": null\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/inventory/products/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "products", ""]
+						}
+					},
+					"response": [],
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.collectionVariables.set('product_cable_id', response.product.id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "3. Create Product with Size",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Футболка Базовая - M\",\n  \"category\": 2,\n  \"unit_type\": \"piece\",\n  \"sale_price\": 25000.00,\n  \"has_sizes\": true,\n  \"default_size_id\": {{size_id_m}},\n  \"available_size_ids\": [{{size_id_m}}, {{size_id_l}}],\n  \"batch_info\": {\n    \"quantity\": 20,\n    \"purchase_price\": 15000.00,\n    \"supplier\": \"Текстиль Плюс\",\n    \"expiration_date\": null\n  },\n  \"size_id\": {{size_id_m}}\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/inventory/products/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "products", ""]
+						}
+					},
+					"response": [],
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.collectionVariables.set('product_tshirt_m_id', response.product.id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "4. Create Multi-Size Products",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Джинсы Классические\",\n  \"category\": 2,\n  \"unit_type\": \"piece\",\n  \"sale_price\": 45000.00,\n  \"batch_info\": [\n    {\n      \"size_id\": {{size_id_m}},\n      \"quantity\": 15,\n      \"purchase_price\": 28000.00,\n      \"supplier\": \"Fashion Import\",\n      \"expiration_date\": null\n    },\n    {\n      \"size_id\": {{size_id_l}},\n      \"quantity\": 12,\n      \"purchase_price\": 28000.00,\n      \"supplier\": \"Fashion Import\",\n      \"expiration_date\": null\n    }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/inventory/products/create_multi_size/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "products", "create_multi_size", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "5. Scan Barcode",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/inventory/products/scan_barcode/?barcode=1234567890123",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "products", "scan_barcode", ""],
+							"query": [
+								{
+									"key": "barcode",
+									"value": "1234567890123"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "6. Get All Products",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/inventory/products/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "products", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "7. Get Units Info",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/inventory/products/units_info/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "products", "units_info", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "8. Get Product Sizes Info",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/inventory/products/product_sizes_info/?name=Футболка",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "products", "product_sizes_info", ""],
+							"query": [
+								{
+									"key": "name",
+									"value": "Футболка"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "9. Check Product Sizes",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"product_names\": [\"Футболка\", \"Джинсы\", \"Платье\"]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/inventory/products/check_sizes/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "products", "check_sizes", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "10. Get Pricing Analysis",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/inventory/products/pricing_analysis/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "products", "pricing_analysis", ""]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "📦 INVENTORY - BATCHES",
+			"item": [
+				{
+					"name": "1. Create Product Batch",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"product\": {{product_bolt_id}},\n  \"quantity\": 50,\n  \"purchase_price\": 280.00,\n  \"supplier\": \"Новый поставщик\",\n  \"invoice_number\": \"INV-2024-001\",\n  \"expiration_date\": \"2025-12-31\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/inventory/batches/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "batches", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "2. Get All Batches",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/inventory/batches/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "batches", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "3. Get Expiring Soon Batches",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/inventory/batches/expiring_soon/?days=30",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "batches", "expiring_soon", ""],
+							"query": [
+								{
+									"key": "days",
+									"value": "30"
+								}
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "📊 INVENTORY - STOCK",
+			"item": [
+				{
+					"name": "1. Get Stock List",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/inventory/stock/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "stock", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "2. Get Stock Summary",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/inventory/stock/summary/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "stock", "summary", ""]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "👥 CUSTOMERS",
+			"item": [
+				{
+					"name": "1. Create Customer",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"full_name\": \"Алексей Петров\",\n  \"phone\": \"+998901234571\",\n  \"debt\": 0\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/customers/",
+							"host": ["{{base_url}}"],
+							"path": ["customers", ""]
+						}
+					},
+					"response": [],
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.collectionVariables.set('customer_id', response.id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "2. Get All Customers",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/customers/?page=all",
+							"host": ["{{base_url}}"],
+							"path": ["customers", ""],
+							"query": [
+								{
+									"key": "page",
+									"value": "all"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "3. Search Customers",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/customers/?q=Алексей",
+							"host": ["{{base_url}}"],
+							"path": ["customers", ""],
+							"query": [
+								{
+									"key": "q",
+									"value": "Алексей"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "4. Get Customers with Debt",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/customers/with_debt/",
+							"host": ["{{base_url}}"],
+							"path": ["customers", "with_debt", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "5. Get Customer Statistics",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/customers/statistics/",
+							"host": ["{{base_url}}"],
+							"path": ["customers", "statistics", ""]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "💰 SALES",
+			"item": [
+				{
+					"name": "1. Create Sale (Cash)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"payment_method\": \"cash\",\n  \"items\": [\n    {\n      \"product_id\": {{product_bolt_id}},\n      \"quantity\": 5\n    },\n    {\n      \"product_id\": {{product_cable_id}},\n      \"quantity\": 2.5\n    }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/sales/transactions/",
+							"host": ["{{base_url}}"],
+							"path": ["sales", "transactions", ""]
+						}
+					},
+					"response": [],
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.collectionVariables.set('transaction_id', response.id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				},
+				{
+					"name": "2. Create Sale with Customer (Debt)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"payment_method\": \"debt\",\n  \"customer\": {{customer_id}},\n  \"items\": [\n    {\n      \"product_id\": {{product_tshirt_m_id}},\n      \"quantity\": 2\n    }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/sales/transactions/",
+							"host": ["{{base_url}}"],
+							"path": ["sales", "transactions", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "3. Create Sale with New Customer",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"payment_method\": \"card\",\n  \"new_customer\": {\n    \"full_name\": \"Мария Иванова\",\n    \"phone\": \"+998901234572\"\n  },\n  \"items\": [\n    {\n      \"product_id\": {{product_bolt_id}},\n      \"quantity\": 3\n    }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/sales/transactions/",
+							"host": ["{{base_url}}"],
+							"path": ["sales", "transactions", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "4. Get All Transactions",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/sales/transactions/",
+							"host": ["{{base_url}}"],
+							"path": ["sales", "transactions", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "5. Get Today Sales",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/sales/transactions/today_sales/",
+							"host": ["{{base_url}}"],
+							"path": ["sales", "transactions", "today_sales", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "6. Get Sales Statistics",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/sales/transactions/statistics/",
+							"host": ["{{base_url}}"],
+							"path": ["sales", "transactions", "statistics", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "7. Get Cashier Summary",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/sales/cashier-summary/",
+							"host": ["{{base_url}}"],
+							"path": ["sales", "cashier-summary", ""]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "📈 ANALYTICS",
+			"item": [
+				{
+					"name": "1. Get Financial Summary",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/analytics/sales/financial_summary/",
+							"host": ["{{base_url}}"],
+							"path": ["analytics", "sales", "financial_summary", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "2. Get Financial Summary with Filters",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/analytics/sales/financial_summary/?start_date=2024-01-01&end_date=2024-12-31",
+							"host": ["{{base_url}}"],
+							"path": ["analytics", "sales", "financial_summary", ""],
+							"query": [
+								{
+									"key": "start_date",
+									"value": "2024-01-01"
+								},
+								{
+									"key": "end_date",
+									"value": "2024-12-31"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "3. Get Purchases Detail",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/analytics/sales/purchases_detail/",
+							"host": ["{{base_url}}"],
+							"path": ["analytics", "sales", "purchases_detail", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "4. Get Top Products",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/analytics/products/top_products/?limit=10",
+							"host": ["{{base_url}}"],
+							"path": ["analytics", "products", "top_products", ""],
+							"query": [
+								{
+									"key": "limit",
+									"value": "10"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "5. Get Top Customers",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/analytics/customers/top_customers/?limit=5",
+							"host": ["{{base_url}}"],
+							"path": ["analytics", "customers", "top_customers", ""],
+							"query": [
+								{
+									"key": "limit",
+									"value": "5"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "6. Get Transaction History",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/sales/transaction-history/?limit=10&offset=0",
+							"host": ["{{base_url}}"],
+							"path": ["sales", "transaction-history", ""],
+							"query": [
+								{
+									"key": "limit",
+									"value": "10"
+								},
+								{
+									"key": "offset",
+									"value": "0"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "7. Get Transactions by Day",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/analytics/transactions-by-day/?date_from=2024-01-01&date_to=2024-12-31",
+							"host": ["{{base_url}}"],
+							"path": ["analytics", "transactions-by-day", ""],
+							"query": [
+								{
+									"key": "date_from",
+									"value": "2024-01-01"
+								},
+								{
+									"key": "date_to",
+									"value": "2024-12-31"
+								}
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "📊 INVENTORY STATISTICS",
+			"item": [
+				{
+					"name": "1. Get Inventory Stats",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/inventory/stats/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "stats", ""]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "🔧 DEBUG & TESTING",
+			"item": [
+				{
+					"name": "1. Debug Store Access",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/stores/debug-access/",
+							"host": ["{{base_url}}"],
+							"path": ["stores", "debug-access", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "2. Debug Token Info",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/stores/debug-token/",
+							"host": ["{{base_url}}"],
+							"path": ["stores", "debug-token", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "3. Debug URLs",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/stores/debug/",
+							"host": ["{{base_url}}"],
+							"path": ["stores", "debug", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "4. Refresh Token",
+					"request": {
+						"auth": {
+							"type": "noauth"
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"refresh\": \"{{refresh_token}}\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/stores/refresh-token/",
+							"host": ["{{base_url}}"],
+							"path": ["stores", "refresh-token", ""]
+						}
+					},
+					"response": [],
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (pm.response.code === 200) {",
+									"    const response = pm.response.json();",
+									"    pm.collectionVariables.set('access_token', response.access);",
+									"    pm.collectionVariables.set('refresh_token', response.refresh);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "🧪 ADVANCED TESTING",
+			"item": [
+				{
+					"name": "1. Test Fractional Quantities Sale",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"payment_method\": \"cash\",\n  \"items\": [\n    {\n      \"product_id\": {{product_cable_id}},\n      \"quantity\": 3.75\n    }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/sales/transactions/",
+							"host": ["{{base_url}}"],
+							"path": ["sales", "transactions", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "2. Test Custom Price (Below Markup)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"payment_method\": \"cash\",\n  \"items\": [\n    {\n      \"product_id\": {{product_bolt_id}},\n      \"quantity\": 2,\n      \"price\": 250.00\n    }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/sales/transactions/",
+							"host": ["{{base_url}}"],
+							"path": ["sales", "transactions", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "3. Test Bulk Price Update",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"updates\": [\n    {\n      \"product_id\": {{product_bolt_id}},\n      \"sale_price\": 550.00\n    },\n    {\n      \"product_id\": {{product_cable_id}},\n      \"sale_price\": 2700.00\n    }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/inventory/products/bulk_update_pricing/",
+							"host": ["{{base_url}}"],
+							"path": ["inventory", "products", "bulk_update_pricing", ""]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "4. Test Search by Phone",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/customers/search_by_phone/?phone=+998901234571",
+							"host": ["{{base_url}}"],
+							"path": ["customers", "search_by_phone", ""],
+							"query": [
+								{
+									"key": "phone",
+									"value": "+998901234571"
+								}
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					"// Проверяем что access_token установлен для authenticated запросов",
+					"if (pm.request.auth && pm.request.auth.type === 'bearer') {",
+					"    const token = pm.collectionVariables.get('access_token');",
+					"    if (!token) {",
+					"        console.warn('⚠️ Access token не установлен. Выполните запрос Login сначала.');",
+					"    }",
+					"}"
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					"// Глобальные тесты",
+					"if (pm.response.code >= 400) {",
+					"    console.log('❌ Error Response:', pm.response.json());",
+					"}",
+					"",
+					"// Автоматическое обновление токена при 401",
+					"if (pm.response.code === 401) {",
+					"    console.log('🔄 Token expired, refresh needed');",
+					"}"
+				]
+			}
+		}
+	]
 }

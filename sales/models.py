@@ -16,6 +16,7 @@ class Transaction(StoreOwnedModel):
         ('transfer', 'Перевод'),
         ('card', 'Карта'),
         ('debt', 'В долг'),
+        ('hybrid', 'Гибридная оплата'),  # ← НОВЫЙ МЕТОД
     ]
 
     cashier = models.ForeignKey(
@@ -32,7 +33,7 @@ class Transaction(StoreOwnedModel):
         related_name='purchases'
     )
     total_amount = models.DecimalField(
-        max_digits=12,  # Увеличено для больших сумм
+        max_digits=12,
         decimal_places=2,
         validators=[MinValueValidator(0)]
     )
@@ -41,6 +42,30 @@ class Transaction(StoreOwnedModel):
         choices=PAYMENT_METHODS,
         default='cash'
     )
+    
+    # ← НОВЫЕ ПОЛЯ для гибридной оплаты
+    cash_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        validators=[MinValueValidator(0)],
+        help_text="Сумма наличными (для гибридной оплаты)"
+    )
+    transfer_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        validators=[MinValueValidator(0)],
+        help_text="Сумма переводом (для гибридной оплаты)"
+    )
+    card_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        validators=[MinValueValidator(0)],
+        help_text="Сумма картой (для гибридной оплаты)"
+    )
+    
     status = models.CharField(
         max_length=20,
         choices=[('completed', 'Completed'), ('pending', 'Pending'), ('refunded', 'Refunded')],
@@ -68,9 +93,77 @@ class Transaction(StoreOwnedModel):
             total=models.Sum('quantity')
         )['total'] or Decimal('0')
 
+    @property
+    def payment_details(self):
+        """Возвращает детали оплаты"""
+        if self.payment_method != 'hybrid':
+            return {
+                'method': self.get_payment_method_display(),
+                'amount': self.total_amount,
+                'is_hybrid': False
+            }
+        
+        details = {
+            'is_hybrid': True,
+            'total': self.total_amount,
+            'methods': []
+        }
+        
+        if self.cash_amount > 0:
+            details['methods'].append({
+                'method': 'cash',
+                'method_display': 'Наличные',
+                'amount': self.cash_amount
+            })
+            
+        if self.transfer_amount > 0:
+            details['methods'].append({
+                'method': 'transfer',
+                'method_display': 'Перевод',
+                'amount': self.transfer_amount
+            })
+            
+        if self.card_amount > 0:
+            details['methods'].append({
+                'method': 'card',
+                'method_display': 'Карта',
+                'amount': self.card_amount
+            })
+            
+        return details
+
+    def clean(self):
+        """Валидация гибридной оплаты"""
+        super().clean()
+        
+        if self.payment_method == 'hybrid':
+            hybrid_total = self.cash_amount + self.transfer_amount + self.card_amount
+            
+            # Проверяем что сумма гибридной оплаты равна общей сумме
+            if abs(hybrid_total - self.total_amount) > Decimal('0.01'):
+                from django.core.exceptions import ValidationError
+                raise ValidationError(
+                    f"Сумма гибридной оплаты ({hybrid_total}) не равна общей сумме ({self.total_amount})"
+                )
+            
+            # Проверяем что указан хотя бы один способ оплаты
+            if hybrid_total == 0:
+                from django.core.exceptions import ValidationError
+                raise ValidationError("Для гибридной оплаты должен быть указан хотя бы один способ")
+                
+        else:
+            # Для обычных методов оплаты обнуляем гибридные поля
+            self.cash_amount = 0
+            self.transfer_amount = 0
+            self.card_amount = 0
+
+    def save(self, *args, **kwargs):
+        self.full_clean()  # Вызываем валидацию
+        super().save(*args, **kwargs)
+
     def process_sale(self):
         """
-        ОБНОВЛЕННАЯ обработка продажи с поддержкой дробных единиц измерения
+        ОБНОВЛЕННАЯ обработка продажи с поддержкой гибридной оплаты
         """
         if self.status != 'pending':
             raise ValueError("Продажа уже обработана или отменена")
@@ -104,9 +197,9 @@ class Transaction(StoreOwnedModel):
                     )
             
             # Списываем со склада
-            stock.sell(float(item.quantity))  # Stock.sell пока работает с float
+            stock.sell(float(item.quantity))
 
-        # Обрабатываем долг, если способ оплаты — "в долг"
+        # Обрабатываем долг только если есть долг в оплате
         if self.payment_method == 'debt':
             if not self.customer:
                 raise ValueError("Для продажи в долг нужен покупатель")
@@ -120,7 +213,9 @@ class Transaction(StoreOwnedModel):
 
         self.status = 'completed'
         self.save(update_fields=['status'])
-        logger.info(f"Продажа #{self.id} завершена: {self.total_amount} ({self.payment_method})")
+        
+        payment_info = "гибридная" if self.payment_method == 'hybrid' else self.get_payment_method_display()
+        logger.info(f"Продажа #{self.id} завершена: {self.total_amount} ({payment_info})")
 
     def get_total_items_with_units(self):
         """
@@ -157,7 +252,6 @@ class Transaction(StoreOwnedModel):
                 'full_description': size.full_description
             }
         return None
-
 
 class TransactionItem(StoreOwnedModel):
     """

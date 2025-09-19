@@ -18,7 +18,7 @@ logger = logging.getLogger('analytics')
 @receiver(post_save, sender=Transaction)
 def process_transaction_analytics(sender, instance, created, **kwargs):
     """
-    ✅ ОБНОВЛЕННЫЙ сигнал для обработки аналитики с поддержкой новых единиц измерения и размеров
+    ✅ ОБНОВЛЕННЫЙ сигнал для обработки аналитики с поддержкой гибридной оплаты
     """
 
     # Обрабатываем только завершённые транзакции
@@ -46,11 +46,11 @@ def process_transaction_analytics(sender, instance, created, **kwargs):
             logger.info(f"🔄 Processing analytics for transaction {instance.id} (amount: {instance.total_amount})")
 
             # Обрабатываем все виды аналитики
-            _process_sales_summary(instance)
+            _process_sales_summary_with_hybrid(instance)  # ← ОБНОВЛЕННАЯ ФУНКЦИЯ
             _process_product_analytics(instance)
-            _process_unit_analytics(instance)  # ← НОВОЕ
-            _process_size_analytics(instance)  # ← НОВОЕ
-            _process_category_analytics(instance)  # ← НОВОЕ
+            _process_unit_analytics(instance)
+            _process_size_analytics(instance)
+            _process_category_analytics(instance)
 
             if instance.customer:
                 _process_customer_analytics(instance)
@@ -67,6 +67,95 @@ def process_transaction_analytics(sender, instance, created, **kwargs):
     finally:
         # Всегда снимаем блокировку
         cache.delete(lock_key)
+
+def _process_sales_summary_with_hybrid(instance):
+    """
+    ОБНОВЛЕННАЯ обработка сводки продаж с поддержкой гибридной оплаты
+    """
+    date = instance.created_at.date()
+    
+    # Подсчитываем количество товаров в транзакции
+    items_count = instance.items.aggregate(
+        total=Sum('quantity')
+    )['total'] or 0
+
+    if instance.payment_method == 'hybrid':
+        # Для гибридной оплаты создаем записи для каждого способа оплаты отдельно
+        hybrid_payments = []
+        
+        if instance.cash_amount > 0:
+            hybrid_payments.append(('cash', instance.cash_amount))
+        if instance.transfer_amount > 0:
+            hybrid_payments.append(('transfer', instance.transfer_amount))
+        if instance.card_amount > 0:
+            hybrid_payments.append(('card', instance.card_amount))
+        
+        # Пропорционально распределяем количество товаров между способами оплаты
+        total_hybrid = instance.cash_amount + instance.transfer_amount + instance.card_amount
+        
+        for payment_method, amount in hybrid_payments:
+            # Рассчитываем пропорциональное количество товаров для этого способа оплаты
+            if total_hybrid > 0:
+                proportional_items = int((amount / total_hybrid) * items_count)
+            else:
+                proportional_items = 0
+                
+            _update_sales_summary_record(
+                instance, date, payment_method, amount, 1, proportional_items
+            )
+            
+        logger.info(f"Processed hybrid payment for transaction {instance.id}: {len(hybrid_payments)} payment methods")
+        
+    else:
+        # Обычная обработка для простых способов оплаты
+        _update_sales_summary_record(
+            instance, date, instance.payment_method, instance.total_amount, 1, items_count
+        )
+
+def _update_sales_summary_record(instance, date, payment_method, amount, transaction_count, items_count):
+    """
+    Обновляет или создает запись в SalesSummary
+    """
+    try:
+        # Ищем существующую запись
+        summary = SalesSummary.objects.filter(
+            store=instance.store,
+            date=date,
+            payment_method=payment_method
+        ).first()
+
+        if summary:
+            # Проверяем, не включена ли уже эта транзакция
+            if _is_transaction_already_included_in_summary(instance, summary):
+                logger.warning(f"Transaction {instance.id} already included in SalesSummary for {payment_method}")
+                return
+
+            # Добавляем к существующей записи
+            summary.total_amount += amount
+            summary.total_transactions += transaction_count
+            summary.total_items_sold += items_count
+            summary.cashier = instance.cashier  # Обновляем на последнего кассира
+            summary.save()
+
+            logger.info(f"Updated SalesSummary ({payment_method}): +{amount} (total: {summary.total_amount})")
+
+        else:
+            # Создаем новую запись
+            summary = SalesSummary.objects.create(
+                store=instance.store,
+                date=date,
+                payment_method=payment_method,
+                cashier=instance.cashier,
+                total_amount=amount,
+                total_transactions=transaction_count,
+                total_items_sold=items_count
+            )
+
+            logger.info(f"Created new SalesSummary ({payment_method}): {amount}")
+
+    except Exception as e:
+        logger.error(f"Error processing sales summary for transaction {instance.id}, method {payment_method}: {str(e)}")
+        raise
 
 
 def _process_sales_summary(instance):
@@ -441,26 +530,51 @@ def _process_customer_analytics(instance):
 def _is_transaction_already_included_in_summary(instance, summary):
     """
     Проверяет, включена ли уже транзакция в сводку
+    (обновленная версия для работы с гибридными платежами)
     """
     try:
+        # Для гибридных платежей проверяем более осторожно
+        # так как одна транзакция может создавать несколько записей в SalesSummary
+        
         # Находим все транзакции за этот день с этим методом оплаты, кроме текущей
         other_transactions = Transaction.objects.filter(
             store=instance.store,
             created_at__date=summary.date,
-            payment_method=summary.payment_method,
             status='completed'
         ).exclude(id=instance.id)
-
-        # Ожидаемая сумма без текущей транзакции
-        expected_amount = other_transactions.aggregate(
-            total=Sum('total_amount')
-        )['total'] or Decimal('0.00')
-
-        # Текущая сумма в сводке минус эта транзакция
-        current_minus_this = summary.total_amount - instance.total_amount
-
+        
+        # Подсчитываем ожидаемую сумму для этого способа оплаты
+        expected_amount = Decimal('0.00')
+        
+        for tx in other_transactions:
+            if tx.payment_method == summary.payment_method:
+                # Простой способ оплаты
+                expected_amount += tx.total_amount
+            elif tx.payment_method == 'hybrid':
+                # Гибридная оплата - берем соответствующую сумму
+                if summary.payment_method == 'cash':
+                    expected_amount += tx.cash_amount
+                elif summary.payment_method == 'transfer':
+                    expected_amount += tx.transfer_amount
+                elif summary.payment_method == 'card':
+                    expected_amount += tx.card_amount
+        
+        # Вычисляем ожидаемую сумму включая текущую транзакцию
+        current_contribution = Decimal('0.00')
+        if instance.payment_method == summary.payment_method:
+            current_contribution = instance.total_amount
+        elif instance.payment_method == 'hybrid':
+            if summary.payment_method == 'cash':
+                current_contribution = instance.cash_amount
+            elif summary.payment_method == 'transfer':
+                current_contribution = instance.transfer_amount
+            elif summary.payment_method == 'card':
+                current_contribution = instance.card_amount
+        
+        expected_amount_with_current = expected_amount + current_contribution
+        
         # Если разница меньше 1 копейки, транзакция уже учтена
-        return abs(current_minus_this - expected_amount) < Decimal('0.01')
+        return abs(summary.total_amount - expected_amount_with_current) < Decimal('0.01')
 
     except Exception as e:
         logger.error(f"Error checking transaction inclusion: {str(e)}")

@@ -705,6 +705,9 @@ class Product(StoreOwnedModel):
         
         super().save(*args, **kwargs)
 
+
+
+
 class ProductAttribute(models.Model):
     product = models.ForeignKey(
         Product,
@@ -913,6 +916,18 @@ class Stock(StoreOwnedModel):
         self.update_quantity()
         logger.info(f"Продано {quantity} {self.product.unit_display} {self.product.name}")
 
+
+class ProductBatchAttribute(StoreOwnedModel):
+    batch = models.ForeignKey(ProductBatch, on_delete=models.CASCADE, related_name='attributes')
+    product_attribute = models.ForeignKey(ProductAttribute, on_delete=models.PROTECT)
+    quantity = models.DecimalField(
+        max_digits=12, decimal_places=3,
+        validators=[MinValueValidator(Decimal('0.001'))]
+    )
+
+    class Meta:
+        verbose_name = "Атрибут партии"
+        verbose_name_plural = "Атрибуты партии"
 
 
 # ✅ ИСПРАВЛЕНИЕ: Исправляем сигналы

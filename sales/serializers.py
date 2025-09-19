@@ -95,7 +95,7 @@ class TransactionItemSerializer(serializers.ModelSerializer):
 
 class TransactionSerializer(serializers.ModelSerializer):
     """
-    ОБНОВЛЕННЫЙ сериализатор для транзакций
+    ОБНОВЛЕННЫЙ сериализатор для транзакций с поддержкой гибридной оплаты
     """
     items = TransactionItemSerializer(many=True)
     customer = serializers.PrimaryKeyRelatedField(
@@ -108,7 +108,31 @@ class TransactionSerializer(serializers.ModelSerializer):
     customer_name = serializers.CharField(source='customer.full_name', read_only=True)
     store_name = serializers.CharField(source='store.name', read_only=True)
     
+    # ← НОВЫЕ ПОЛЯ для гибридной оплаты
+    cash_amount = serializers.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        required=False, 
+        min_value=0,
+        help_text="Сумма наличными (только для гибридной оплаты)"
+    )
+    transfer_amount = serializers.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        required=False, 
+        min_value=0,
+        help_text="Сумма переводом (только для гибридной оплаты)"
+    )
+    card_amount = serializers.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        required=False, 
+        min_value=0,
+        help_text="Сумма картой (только для гибридной оплаты)"
+    )
+    
     # Дополнительная информация
+    payment_details = serializers.SerializerMethodField()
     items_with_units = serializers.SerializerMethodField()
     items_count_display = serializers.SerializerMethodField()
 
@@ -118,12 +142,17 @@ class TransactionSerializer(serializers.ModelSerializer):
             'id', 'cashier', 'cashier_name', 'total_amount',
             'payment_method', 'status', 'customer', 'customer_name',
             'new_customer', 'items', 'created_at', 'store_name',
-            'items_with_units', 'items_count_display'
+            'cash_amount', 'transfer_amount', 'card_amount',  # ← НОВЫЕ ПОЛЯ
+            'payment_details', 'items_with_units', 'items_count_display'
         ]
         read_only_fields = [
             'id', 'cashier', 'cashier_name', 'total_amount', 'created_at', 
-            'store_name', 'items_with_units', 'items_count_display'
+            'store_name', 'payment_details', 'items_with_units', 'items_count_display'
         ]
+
+    def get_payment_details(self, obj):
+        """Возвращает детали оплаты"""
+        return obj.payment_details
 
     def get_items_with_units(self, obj):
         """Возвращает информацию о товарах с единицами измерения"""
@@ -145,12 +174,17 @@ class TransactionSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         """
-        ОБНОВЛЕННАЯ валидация с проверкой минимальной наценки
+        ОБНОВЛЕННАЯ валидация с поддержкой гибридной оплаты
         """
         items = data.get('items', [])
         customer = data.get('customer')
         new_customer = data.get('new_customer')
         payment_method = data.get('payment_method', 'cash')
+        
+        # ← НОВЫЕ ПОЛЯ для валидации
+        cash_amount = data.get('cash_amount', Decimal('0'))
+        transfer_amount = data.get('transfer_amount', Decimal('0'))
+        card_amount = data.get('card_amount', Decimal('0'))
 
         if not items:
             raise serializers.ValidationError({
@@ -187,7 +221,7 @@ class TransactionSerializer(serializers.ModelSerializer):
             else:
                 proposed_price = product.sale_price
 
-            # ✨ НОВАЯ ПРОВЕРКА: Валидация минимальной цены
+            # Валидация минимальной цены
             price_validation = product.validate_sale_price(proposed_price, user_role)
             
             if not price_validation['valid']:
@@ -238,7 +272,7 @@ class TransactionSerializer(serializers.ModelSerializer):
             validated_items.append({
                 'product': product,
                 'quantity': quantity,
-                'price': proposed_price,  # Используем валидированную цену
+                'price': proposed_price,
                 'subtotal': item_total
             })
 
@@ -249,14 +283,53 @@ class TransactionSerializer(serializers.ModelSerializer):
                 "message": "Некоторые товары имеют цену ниже минимальной наценки"
             })
 
+        # ← НОВАЯ ВАЛИДАЦИЯ для гибридной оплаты
+        if payment_method == 'hybrid':
+            hybrid_total = cash_amount + transfer_amount + card_amount
+            
+            # Проверяем что сумма гибридной оплаты равна общей сумме (с допуском на погрешность)
+            if abs(hybrid_total - total_amount) > Decimal('0.01'):
+                raise serializers.ValidationError({
+                    "hybrid_payment_error": f"Сумма гибридной оплаты ({hybrid_total}) не равна общей сумме товаров ({total_amount})",
+                    "details": {
+                        "calculated_total": float(total_amount),
+                        "hybrid_total": float(hybrid_total),
+                        "cash_amount": float(cash_amount),
+                        "transfer_amount": float(transfer_amount),
+                        "card_amount": float(card_amount)
+                    }
+                })
+            
+            # Проверяем что указан хотя бы один способ оплаты
+            if hybrid_total == 0:
+                raise serializers.ValidationError({
+                    "hybrid_payment_error": "Для гибридной оплаты должен быть указан хотя бы один способ с суммой больше нуля"
+                })
+                
+            # Проверяем что все суммы неотрицательные
+            if cash_amount < 0 or transfer_amount < 0 or card_amount < 0:
+                raise serializers.ValidationError({
+                    "hybrid_payment_error": "Все суммы в гибридной оплате должны быть неотрицательными"
+                })
+                
+        else:
+            # Для обычных методов оплаты игнорируем гибридные поля
+            data['cash_amount'] = Decimal('0')
+            data['transfer_amount'] = Decimal('0')
+            data['card_amount'] = Decimal('0')
+
         data['total_amount'] = total_amount
         data['validated_items'] = validated_items
-        logger.info(f"Total amount calculated with markup validation: {total_amount}")
+        
+        logger.info(f"Total amount calculated: {total_amount}, payment_method: {payment_method}")
+        if payment_method == 'hybrid':
+            logger.info(f"Hybrid payment: cash={cash_amount}, transfer={transfer_amount}, card={card_amount}")
+            
         return data
 
     def create(self, validated_data):
         """
-        ОБНОВЛЕННОЕ создание транзакции с дробными количествами
+        ОБНОВЛЕННОЕ создание транзакции с гибридной оплатой
         """
         items_data = validated_data.pop('items')
         validated_items = validated_data.pop('validated_items', [])
@@ -296,9 +369,11 @@ class TransactionSerializer(serializers.ModelSerializer):
             customer=customer,
             **validated_data
         )
-        logger.info(f"Transaction #{transaction.id} created in store {transaction.store.name}")
+        
+        payment_info = "гибридная" if transaction.payment_method == 'hybrid' else transaction.get_payment_method_display()
+        logger.info(f"Transaction #{transaction.id} created in store {transaction.store.name} with {payment_info} payment")
 
-        # Создаем элементы транзакции с ценами ТОЛЬКО из БД
+        # Создаем элементы транзакции
         for item_data in validated_items:
             product = item_data['product']
             quantity = item_data['quantity']
@@ -321,7 +396,7 @@ class TransactionSerializer(serializers.ModelSerializer):
             
             logger.info(
                 f"Transaction item created: {product.name} x{quantity} {product.unit_display} "
-                f"@ {price_from_db} (price from DB)"
+                f"@ {price_from_db}"
             )
 
         # Обрабатываем продажу
@@ -340,7 +415,7 @@ class TransactionSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         """
-        ОБНОВЛЕННОЕ представление с дополнительной информацией о единицах
+        ОБНОВЛЕННОЕ представление с информацией о гибридной оплате
         """
         data = super().to_representation(instance)
 
@@ -357,7 +432,7 @@ class TransactionSerializer(serializers.ModelSerializer):
             item_detail = {
                 'product_id': item.product.id,
                 'product_name': item.product.name,
-                'quantity': str(item.quantity),  # Сохраняем точность Decimal
+                'quantity': str(item.quantity),
                 'quantity_display': f"{item.quantity} {item.unit_display}",
                 'unit_display': item.unit_display,
                 'unit_type': item.unit_type,
@@ -397,7 +472,6 @@ class TransactionSerializer(serializers.ModelSerializer):
         data['units_summary'] = units_summary
 
         return data
-
 
 # Остальные сериализаторы остаются без изменений
 class FilteredTransactionHistorySerializer(serializers.ModelSerializer):
