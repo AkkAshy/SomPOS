@@ -703,81 +703,6 @@ class ProductViewSet(
     ordering = ['-created_at']
 
     queryset = Product.objects.select_related("category", "stock").prefetch_related("size", "batches")
-    # def get_queryset(self):
-    #     # ✅ получаем текущий магазин
-    #     current_store = self.get_current_store()
-
-    #     # если магазин не найден — возвращаем пустой queryset
-    #     if not current_store:
-    #         return Product.objects.none()
-
-    #     return Product.objects.filter(
-    #         store=current_store  # 🔥 фильтрация по магазину
-    #     ).select_related(
-    #         'category', 'stock'
-    #     ).prefetch_related(
-    #         'size',
-    #         'batches'
-    #     )
-
-
-    @swagger_auto_schema(
-        operation_description="Создать товары для множественных размеров",
-        request_body=openapi.Schema(
-            type=openapi.TYPE_OBJECT,
-            properties={
-                'name': openapi.Schema(type=openapi.TYPE_STRING, description='Базовое название товара'),
-                'category': openapi.Schema(type=openapi.TYPE_INTEGER, description='ID категории'),
-                'sale_price': openapi.Schema(type=openapi.TYPE_NUMBER, description='Цена продажи'),
-                'unit': openapi.Schema(type=openapi.TYPE_STRING, description='Единица измерения'),
-                'size_ids': openapi.Schema(
-                    type=openapi.TYPE_ARRAY,
-                    items=openapi.Schema(type=openapi.TYPE_INTEGER),
-                    description='Массив ID размеров'
-                ),
-                'batch_info': openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        'quantity': openapi.Schema(type=openapi.TYPE_INTEGER),
-                        'purchase_price': openapi.Schema(type=openapi.TYPE_NUMBER),
-                        'supplier': openapi.Schema(type=openapi.TYPE_STRING),
-                        'expiration_date': openapi.Schema(type=openapi.TYPE_STRING, format='date', nullable=True)
-                    },
-                    required=[]
-                )
-            },
-            required=['name', 'category', 'sale_price', 'size_ids']
-        ),
-        responses={
-            201: openapi.Schema(
-                type=openapi.TYPE_OBJECT,
-                properties={
-                    'products': openapi.Schema(
-                        type=openapi.TYPE_ARRAY,
-                        items=openapi.Schema(type=openapi.TYPE_OBJECT)
-                    ),
-                    'message': openapi.Schema(type=openapi.TYPE_STRING),
-                    'count': openapi.Schema(type=openapi.TYPE_INTEGER)
-                }
-            ),
-            400: 'Ошибка валидации'
-        }
-    )
-
-# {
-#     "name": "Футболка Армани",
-#     "category": 1,
-#     "sale_price": 150000.00,
-#     "unit": "piece",
-#     "size_ids": [1, 2, 3, 4],  // ID размеров S, M, L, XL
-#     "batch_info": {
-#         "quantity": 10,
-#         "purchase_price": 100000.00,
-#         "supplier": "Армани Official",
-#         "expiration_date": null
-#     }
-# }
-
 
     @action(detail=False, methods=['post'])
     def create_multi_size(self, request):
@@ -1197,17 +1122,51 @@ class ProductViewSet(
                 context={'request': request}
             )
             if batch_serializer.is_valid():
-                # perform_create добавит store к batch автоматически
                 batch_viewset = ProductBatchViewSet()
                 batch_viewset.request = request
-                batch_viewset.perform_create(batch_serializer)
-                logger.info(f"✅ Batch created for new product {product.name}")
-            else:
-                return Response(
-                    {'batch_errors': batch_serializer.errors},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
+                batch = batch_serializer.save(store=product.store)
+                
+                # ✅ ИСПРАВЛЕННАЯ обработка атрибутов для одиночного создания
+                # Проверяем два варианта: 'attributes' (массив) или 'attribute' (одиночный)
+                attributes_data = []
+                
+                # Вариант 1: attributes (для multi-size создания)
+                if 'attributes' in batch_info:
+                    attributes_data = batch_info['attributes']
+                
+                # Вариант 2: attribute (для одиночного создания)
+                elif 'attribute' in batch_info:
+                    attr_info = batch_info['attribute']
+                    # Для одиночного атрибута используем все количество партии
+                    attributes_data = [{
+                        'attribute_value_id': attr_info['id'],
+                        'quantity': batch.quantity  # Берем все количество партии
+                    }]
+                
+                # Создаем атрибуты
+                for attr_data in attributes_data:
+                    try:
+                        # Создаем ProductAttribute для товара
+                        prod_attr, created = ProductAttribute.objects.get_or_create(
+                            product=product,
+                            attribute_value_id=attr_data['attribute_value_id']
+                        )
+                        
+                        # Создаем ProductBatchAttribute
+                        ProductBatchAttribute.objects.create(
+                            batch=batch,
+                            product_attribute=prod_attr,
+                            quantity=attr_data['quantity'],
+                            store=product.store
+                        )
+                        
+                        logger.info(f"Created attribute {attr_data['attribute_value_id']} for batch {batch.id}")
+                        
+                    except Exception as e:
+                        logger.error(f"Error creating batch attribute: {e}")
+                
+                logger.info(f"Batch created for new product {product.name}")
+            
         # 6. Генерируем этикетку
         try:
             product.generate_label()
@@ -1267,18 +1226,7 @@ class ProductViewSet(
                 except AttributeValue.DoesNotExist:
                     logger.warning(f"Атрибут с ID {attribute_value_id} не найден")
 
-    @swagger_auto_schema(
-        operation_description="Сканировать штрих-код и получить информацию о товаре",
-        manual_parameters=[
-            openapi.Parameter(
-                'barcode',
-                openapi.IN_QUERY,
-                description="Штрих-код для сканирования",
-                type=openapi.TYPE_STRING,
-                required=True
-            )
-        ]
-    )
+   
     @action(detail=False, methods=['get'])
     def scan_barcode(self, request):
         """Сканирование штрих-кода - ищет только в текущем магазине"""
