@@ -4,7 +4,7 @@ from django.db import models
 from django.core.validators import MinValueValidator
 from django.db.models.signals import post_save
 from django.dispatch import receiver
-from django.db.models import Sum, F, Min
+from django.db.models import Sum, F, Min, Avg
 from django.conf import settings
 from django.utils.text import format_lazy
 from django.core.files.base import ContentFile
@@ -21,7 +21,10 @@ from reportlab.lib.fonts import addMapping
 from stores.mixins import StoreOwnedModel, StoreOwnedManager
 from django.utils import timezone
 from decimal import Decimal
-
+from datetime import timedelta
+from django.contrib.postgres.fields import ArrayField  # Для PostgreSQL (опционально)
+import uuid
+from users.models import Employee  # Импортируем модель Employee
 
 
 pdfmetrics.registerFont(
@@ -54,6 +57,133 @@ class StoreOwnedSoftDeleteManager(SoftDeleteManager):
 
     def with_deleted_for_store(self, store):
         return self.with_deleted().filter(store=store)
+
+
+class StockHistory(models.Model):
+    """
+    История изменений стока — пульс склада.
+    Записывается автоматически через signals при:
+    - Создании/обновлении ProductBatch (поступление)
+    - Продажах (Sales/Orders)
+    - Возвратах/корректировках
+    """
+    
+    id = models.UUIDField(
+        primary_key=True, 
+        default=uuid.uuid4, 
+        editable=False
+    )
+    
+    # Связи — кто, где, когда
+    product = models.ForeignKey(
+        'Product', 
+        on_delete=models.CASCADE, 
+        related_name='stock_history'
+    )
+    store = models.ForeignKey(
+        'stores.Store', 
+        on_delete=models.CASCADE,
+        related_name='stock_history'
+    )
+    batch = models.ForeignKey(
+        'ProductBatch', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='stock_history_entries'
+    )  # Если изменение связано с конкретной партией
+    
+    # Временные метки — основа аналитики
+    timestamp = models.DateTimeField(default=timezone.now, db_index=True)
+    date_only = models.DateField(auto_now_add=True, db_index=True)  # Для группировки по дням
+    
+    # Количества — до и после
+    quantity_before = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    quantity_after = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    quantity_change = models.DecimalField(max_digits=12, decimal_places=3, default=0)
+    
+    # Тип операции — что произошло
+    operation_type = models.CharField(
+        max_length=50,
+        choices=[
+            ('INCOMING', 'Поступление'),      # Новый батч
+            ('SALE', 'Продажа'),              # Отгрузка
+            ('RETURN', 'Возврат'),            # Поступление обратно
+            ('CORRECTION', 'Корректировка'),  # Ручное изменение
+            ('EXPIRATION', 'Списание'),       # Просрочка
+            ('TRANSFER', 'Перемещение'),      # Между магазинами
+            ('REVALUATION', 'Переоценка'),    # Изменение цены
+        ],
+        db_index=True
+    )
+    
+    # Детали операции — контекст для анализа
+    reference_id = models.CharField(max_length=100, blank=True, null=True)  # ID заказа/документа
+    user = models.ForeignKey(
+        'auth.User', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='stock_changes'
+    )  # Кто сделал изменение
+    
+    # Размер и атрибуты — для детального анализа
+    size = models.ForeignKey(
+        'SizeInfo', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True
+    )
+    attributes_snapshot = ArrayField(  # PostgreSQL: моментальный снимок атрибутов
+        models.JSONField(),
+        size=10,
+        blank=True,
+        null=True
+    )  # [{'attribute_value_id': 1, 'quantity': 5}, ...]
+    
+    # Финансовые метки — для маржинального анализа
+    purchase_price_at_time = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    sale_price_at_time = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    
+    # Статус и примечания
+    notes = models.TextField(blank=True, null=True)
+    is_automatic = models.BooleanField(default=True)  # Сигнал или вручную?
+    
+    # Индексы для скорости аналитики
+    class Meta:
+        db_table = 'inventory_stock_history'
+        indexes = [
+            models.Index(fields=['product', 'date_only']),  # Тренды по продукту
+            models.Index(fields=['store', 'date_only']),    # Тренды по магазину
+            models.Index(fields=['timestamp']),             # Временные ряды
+            models.Index(fields=['operation_type', 'date_only']),  # Анализ операций
+        ]
+        ordering = ['-timestamp']
+    
+    def __str__(self):
+        return f"{self.product.name} | {self.operation_type} | {self.quantity_change} | {self.timestamp.strftime('%Y-%m-%d')}"
+    
+    def save(self, *args, **kwargs):
+        """Автоматические расчёты при сохранении"""
+        if self.pk is None:  # Новый объект
+            self.quantity_change = self.quantity_after - self.quantity_before
+        super().save(*args, **kwargs)
+    
+    @classmethod
+    def get_daily_summary(cls, product, date):
+        """Ежедневная сводка для аналитики"""
+        entries = cls.objects.filter(product=product, date_only=date)
+        return {
+            'date': date,
+            'total_incoming': entries.filter(operation_type='INCOMING').aggregate(
+                sum=models.Sum('quantity_change')
+            )['sum'] or 0,
+            'total_sales': abs(entries.filter(operation_type='SALE').aggregate(
+                sum=models.Sum('quantity_change')
+            )['sum'] or 0),
+            'net_change': entries.aggregate(sum=models.Sum('quantity_change'))['sum'] or 0,
+            'end_of_day_stock': entries.last().quantity_after if entries.exists() else 0
+        }
 
 
 class CustomUnit(StoreOwnedModel):
@@ -599,6 +729,68 @@ class Product(StoreOwnedModel):
             'batches_count': self.batches.filter(quantity__gt=0).count()
         }
     
+    def complete_movement_history(self, days=30):
+        """✅ Ленивый импорт TransactionItem — только внутри метода"""
+        from_date = timezone.now() - timedelta(days=days)
+        
+        # ✅ ЛЕНИВЫЙ ИМПОРТ — только здесь!
+        from sales.models import TransactionItem
+        
+        # Теперь filter работает без проблем
+        sales_items = TransactionItem.objects.filter(
+            product=self,
+            transaction__created_at__gte=from_date,
+            transaction__status='completed'
+        ).values_list('quantity', 'price')
+        
+        # Подсчёт выручки (как мы обсуждали)
+        sales_revenue = sum(
+            Decimal(str(qty)) * Decimal(str(price))
+            for qty, price in sales_items
+        )
+        
+        # Остальная логика (StockHistory и т.д.)
+        incoming = self.stock_history.filter(
+            operation_type='INCOMING',
+            timestamp__gte=from_date
+        ).aggregate(total_in=Sum('quantity_change'))['total_in'] or Decimal('0.00')
+        
+        sales_history = self.stock_history.filter(
+            operation_type='SALE',
+            timestamp__gte=from_date
+        ).aggregate(total_sold=Sum('quantity_change'))['total_sold'] or Decimal('0.00')
+        
+        current_stock = Decimal(str(self.stock.quantity)) if hasattr(self, 'stock') else Decimal('0.00')
+        
+        # Маржа
+        avg_purchase = (self.price_info['purchase_prices']['average'] 
+                       if self.price_info and 'purchase_prices' in self.price_info 
+                       else 0)
+        avg_purchase = Decimal(str(avg_purchase))
+        cost_of_goods_sold = abs(sales_history) * avg_purchase
+        margin = sales_revenue - cost_of_goods_sold
+        
+        return {
+            'period_days': days,
+            'incoming': float(incoming),
+            'sold': float(abs(sales_history)),
+            'current_stock': float(current_stock),
+            'revenue': float(sales_revenue),
+            'cost_of_goods': float(cost_of_goods_sold),
+            'margin': float(margin),
+            'margin_percentage': float((margin / sales_revenue * 100) if sales_revenue else 0),
+            'inventory_turnover': float(abs(sales_history) / (current_stock or Decimal('1.00'))),
+            'days_of_stock': float(current_stock / (abs(sales_history) / Decimal(str(days))) if sales_history else 999)
+        }
+    
+    
+    def inventory_turnover(self, period_days=30):
+        """Коэффициент оборачиваемости запасов за заданный период (по умолчанию 30 дней)"""
+        from_date = timezone.now() - timedelta(days=period_days)
+        sales = self.sales.aggregate(total=Sum('quantity'))['total'] or 0  # Предполагаю модель Sales
+        avg_stock = self.stock.aggregate(avg=Avg('quantity'))['avg'] or 1  # Избежать деления на 0
+        return sales / avg_stock if avg_stock else 0
+    
     def _calculate_margin(self, sale_price, purchase_price):
         """Расчет маржи в процентах"""
         if not purchase_price or purchase_price == 0:
@@ -916,6 +1108,13 @@ class Stock(StoreOwnedModel):
         self.update_quantity()
         logger.info(f"Продано {quantity} {self.product.unit_display} {self.product.name}")
 
+    def stockout_rate(self, period_days=30):
+        from_date = timezone.now() - timedelta(days=period_days)
+        out_days = StockHistory.objects.filter(  # Нужна история стока
+            product=self.product, date__gte=from_date, quantity=0
+        ).count()
+        return (out_days / period_days) * 100 if period_days else 0
+
 
 class ProductBatchAttribute(StoreOwnedModel):
     batch = models.ForeignKey(ProductBatch, on_delete=models.CASCADE, related_name='attributes')
@@ -982,3 +1181,58 @@ def update_stock_on_batch_change(sender, instance, **kwargs):
 
     except Exception as e:
         logger.error(f"❌ Error updating stock for batch {instance.id}: {str(e)}")
+
+
+class FinancialSummary(models.Model):
+    """
+    Дневная финансовая сводка по магазину
+    """
+    date = models.DateField(db_index=True)
+    store = models.ForeignKey('stores.Store', on_delete=models.CASCADE, related_name='financial_summaries')
+    
+    # Оплата по методам
+    cash_total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    transfer_total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    card_total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    debt_total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    
+    # Общие метрики
+    total_transactions = models.IntegerField(default=0)
+    grand_total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    avg_transaction = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    
+    # Аналитика по клиентам
+    unique_customers = models.IntegerField(default=0)
+    repeat_customers = models.IntegerField(default=0)
+    customer_retention_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    
+    # Маржинальность
+    total_margin = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    margin_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    
+    # Кассиры
+    top_cashier_id = models.ForeignKey(Employee, on_delete=models.SET_NULL, null=True, blank=True)
+    top_cashier_sales = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        unique_together = ['date', 'store']
+        indexes = [
+            models.Index(fields=['date', 'store']),
+            models.Index(fields=['store', 'date']),
+        ]
+        ordering = ['-date']
+    
+    def save(self, *args, **kwargs):
+        """Автоматические расчёты"""
+        if self.total_transactions > 0:
+            self.avg_transaction = self.grand_total / self.total_transactions
+            self.cash_percentage = (self.cash_total / self.grand_total * 100) if self.grand_total else 0
+            self.card_percentage = (self.card_total / self.grand_total * 100) if self.grand_total else 0
+        
+        super().save(*args, **kwargs)
+    
+    def __str__(self):
+        return f"{self.store.name} | {self.date} | {self.grand_total:,} сум"

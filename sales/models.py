@@ -2,7 +2,6 @@
 from django.db import models
 from django.core.validators import MinValueValidator
 from django.contrib.auth.models import User
-from inventory.models import Product, Stock
 import logging
 from stores.mixins import StoreOwnedModel, StoreOwnedManager
 from decimal import Decimal
@@ -263,7 +262,7 @@ class TransactionItem(StoreOwnedModel):
         related_name='items'
     )
     product = models.ForeignKey(
-        Product,
+        'inventory.Product',  # ← Строка! Без импорта
         on_delete=models.PROTECT,
         related_name='sale_items'
     )

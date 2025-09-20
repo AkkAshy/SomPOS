@@ -145,12 +145,6 @@ class DebugStoreAccessView(APIView):
 
         return Response(debug_info)
 
-# 2. Добавьте в stores/urls.py:
-# path('debug-access/', DebugStoreAccessView.as_view(), name='debug-store-access'),
-
-# 3. Протестируйте через API:
-# GET /api/stores/debug-access/
-# Authorization: Bearer YOUR_JWT_TOKEN
 
 @csrf_exempt
 @require_http_methods(["POST"])

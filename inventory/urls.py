@@ -7,6 +7,9 @@ app_name = 'inventory'
 
 # Создаем роутер для ViewSets
 router = DefaultRouter()
+router.register(r'analytics/payments', views.PaymentAnalyticsViewSet, basename='payment-analytics')
+router.register(r'analytics/sizes', views.SizeAnalyticsViewSet, basename='size-analytics')
+router.register(r'analytics/financial-summary', views.FinancialSummaryViewSet, basename='financial-summary')
 router.register(r'categories', views.ProductCategoryViewSet, basename='productcategory')
 router.register(r'attribute-types', views.AttributeTypeViewSet, basename='attributetype')
 router.register(r'attribute-values', views.AttributeValueViewSet, basename='attributevalue')
@@ -15,6 +18,7 @@ router.register(r'batches', views.ProductBatchViewSet, basename='productbatch')
 router.register(r'stock', views.StockViewSet, basename='stock')
 router.register(r'size-info', views.SizeInfoViewSet, basename='sizeinfo')
 router.register(r'custom-units', views.CustomUnitViewSet, basename='customunit')  # ← НОВЫЙ
+router.register(r'stock-history', views.StockHistoryViewSet, basename='stock-history')
 
 urlpatterns = [
     # ViewSets через роутер

@@ -4,8 +4,129 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from rest_framework import serializers
 from .models import Store
 import logging
+from rest_framework.permissions import BasePermission
+import jwt
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from stores.services.store_access_service import store_access_service
+
+
 
 logger = logging.getLogger(__name__)
+
+
+
+class StoreJWTPermission(BasePermission):
+    """
+    Permission для JWT-аутентификации с информацией о магазине в токене
+    """
+    
+    def has_permission(self, request, view):
+        # Получаем токен из заголовка
+        auth_header = request.META.get('HTTP_AUTHORIZATION')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return False
+        
+        token = auth_header.split(' ')[1]
+        
+        try:
+            # Декодируем токен (без проверки подписи для получения данных)
+            decoded_token = jwt.decode(token, options={"verify_signature": False})
+            
+            # Получаем данные из токена
+            user_id = decoded_token.get('user_id')
+            store_id = decoded_token.get('store_id')
+            store_name = decoded_token.get('store_name')
+            
+            if not user_id or not store_id:
+                return False
+            
+            # Получаем пользователя
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            
+            try:
+                user = User.objects.get(id=user_id)
+                request.user = user
+            except User.DoesNotExist:
+                return False
+            
+            # Получаем магазин
+            from stores.models import Store
+            try:
+                store = Store.objects.get(id=store_id)
+                request.current_store = store
+                
+                # Устанавливаем current_store для user (для совместимости)
+                user.current_store = store
+                
+            except Store.DoesNotExist:
+                return False
+            
+            # Проверяем права пользователя в магазине
+            from stores.models import StoreEmployee
+            membership = StoreEmployee.objects.filter(
+                user=user,
+                store=store,
+                is_active=True
+            ).first()
+            
+            if not membership:
+                return False
+            
+            # Сохраняем роль для дальнейшего использования
+            request.user_store_role = membership.role
+            
+            return True
+            
+        except (jwt.DecodeError, KeyError, ValueError) as e:
+            print(f"DEBUG: JWT decode error: {e}")
+            return False
+    
+    def has_object_permission(self, request, view, obj):
+        # Проверяем, что объект принадлежит магазину из токена
+        if hasattr(obj, 'store') and hasattr(request, 'current_store'):
+            return obj.store == request.current_store
+        return True
+    
+
+
+class StoreJWTAuthentication(JWTAuthentication):
+    """
+    Кастомная JWT-аутентификация с установкой текущего магазина
+    """
+    
+    def get_user(self, validated_token):
+        user = super().get_user(validated_token)
+        
+        # Получаем store_id из токена
+        store_id = validated_token.get('store_id')
+        if store_id:
+            from stores.models import Store
+            try:
+                store = Store.objects.get(id=store_id)
+                user.current_store = store
+            except Store.DoesNotExist:
+                pass
+        
+        return user
+
+class SimpleStorePermission(BasePermission):
+    """
+    Простая проверка после JWT-аутентификации
+    """
+    
+    def has_permission(self, request, view):
+        # Пользователь уже аутентифицирован через JWT
+        if not hasattr(request, 'user') or not request.user:
+            return False
+        
+        # Проверяем наличие current_store
+        if hasattr(request.user, 'current_store') and request.user.current_store:
+            request.current_store = request.user.current_store
+            return True
+        
+        return False
+    
 
 
 class StoreOwnedModel(models.Model):
@@ -294,3 +415,118 @@ class StorePermissionMixin:
         """Проверяет разрешение и выбрасывает исключение если нет доступа"""
         if not self.has_store_permission(user, permission_name):
             raise PermissionDenied(f"У вас нет разрешения: {permission_name}")
+        
+
+class StorePermissionWrapper(BasePermission):
+    """
+    🛡️ Страж ворот — использует мудрость StoreAccessService
+    """
+    
+    def has_permission(self, request, view):
+        """
+        🚪 Проверка на вход: аутентификация + доступ к магазину
+        """
+        if not request.user.is_authenticated:
+            logger.debug("🚫 Анонимный гость у ворот")
+            return False
+        
+        logger.debug(f"👤 Гость: {request.user.username}")
+        
+        # Спрашиваем у оракула, куда идти этому пользователю
+        current_store = store_access_service.get_current_store(request.user, request)
+        request.user.current_store = current_store  # Сохраняем для потомков
+        
+        logger.debug(f"🏪 Назначен магазин: {getattr(current_store, 'name', 'НЕТ')}")
+        
+        # Базовая проверка доступа к магазину
+        if not current_store:
+            self.message = "Ключей к этому царству у тебя нет"
+            logger.warning(f"⚠️ {request.user.username} — бездомный странник")
+            return False
+        
+        # Сохраняем магазин в запросе для всех
+        request.current_store = current_store
+        
+        # Для чтения — открываем двери
+        if request.method in ['GET', 'HEAD', 'OPTIONS']:
+            logger.debug(f"📖 Чтение разрешено для {request.user.username}")
+            return True
+        
+        # Для изменений — проверяем конкретные полномочия
+        required_permission = self._get_permission_for_method(request.method)
+        has_permission = self._check_user_permission(request.user, required_permission)
+        
+        logger.debug(f"🔑 {required_permission}-разрешение: {'✅' if has_permission else '❌'}")
+        return has_permission
+    
+    def has_object_permission(self, request, view, obj):
+        """
+        🔍 Проверка конкретного сокровища
+        """
+        if not request.user.is_authenticated:
+            return False
+        
+        # Базовый доступ должен быть
+        if not hasattr(request, 'current_store') or not request.current_store:
+            return False
+        
+        # Сокровище должно принадлежать твоему царству
+        if hasattr(obj, 'store') and obj.store != request.current_store:
+            logger.debug(f"🚫 {obj} принадлежит другому дому")
+            return False
+        
+        # Чтение — всегда приветствуется
+        if request.method in ['GET', 'HEAD', 'OPTIONS']:
+            return True
+        
+        # Изменения требуют специального благословения
+        required_permission = self._get_permission_for_method(request.method)
+        return self._check_user_permission(request.user, required_permission)
+    
+    def _check_user_permission(self, user, permission_name: str) -> bool:
+        """
+        🎭 Проверяет конкретное разрешение пользователя
+        """
+        # Базовый доступ к магазину
+        current_store = getattr(user, 'current_store', None)
+        if not current_store or not store_access_service._user_has_access_to_store(user, current_store):
+            return False
+        
+        # TODO: Здесь можешь добавить более сложную логику разрешений
+        # Например, проверку ролей в StoreEmployee (manager, cashier, etc.)
+        
+        # Пока что — если есть доступ к магазину, то есть и к действию
+        permissions_map = {
+            'view': True,
+            'add': True,   # Или проверяй: user.employee.role in ['manager', 'admin']
+            'change': True,
+            'delete': False  # Только для админов, например
+        }
+        
+        return permissions_map.get(permission_name, False)
+    
+    def _get_permission_for_method(self, method):
+        """
+        🗺️ Путь от HTTP к разрешению
+        """
+        method_to_permission = {
+            'GET': 'view',
+            'POST': 'add',
+            'PUT': 'change',
+            'PATCH': 'change',
+            'DELETE': 'delete',
+            'HEAD': 'view',
+            'OPTIONS': 'view'
+        }
+        return method_to_permission.get(method, 'view')
+    
+    def check_store_permission(self, user, permission_name: str, raise_exception=True):
+        """
+        🔑 Универсальная проверка с опцией бунта
+        """
+        has_access = self._check_user_permission(user, permission_name)
+        
+        if raise_exception and not has_access:
+            raise PermissionDenied(f"Полномочий {permission_name} у тебя нет, странник")
+        
+        return has_access

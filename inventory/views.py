@@ -1,13 +1,14 @@
-
 # inventory/views.py
 from rest_framework import status, generics, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.viewsets import ModelViewSet
 from django.db import transaction, models
-from django.db.models import Q, Sum, Prefetch, F
+from django.db.models import Value
+from django.db.models.functions import Concat
+from django.db.models import Q, Sum, F, Count, Avg
 from django.utils.translation import gettext_lazy as _
-from django_filters.rest_framework import DjangoFilterBackend, FilterSet, NumberFilter, CharFilter
+from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.pagination import LimitOffsetPagination
 from drf_yasg.utils import swagger_auto_schema
@@ -16,9 +17,18 @@ import logging
 from django.core.exceptions import ValidationError
 from rest_framework import pagination
 from .pagination import OptionalPagination
-from stores.mixins import StoreViewSetMixin, StoreSerializerMixin, StorePermissionMixin
+from stores.mixins import StoreViewSetMixin, StoreSerializerMixin, StorePermissionMixin, StorePermissionWrapper
 from decimal import Decimal
+from django.utils import timezone
+from rest_framework.permissions import IsAuthenticated
+from sales.models import TransactionItem, Transaction  # Твои импорты
+from datetime import timedelta
+from .models import ( Product, ProductCategory, Stock, ProductBatch,
+    AttributeType, AttributeValue, ProductAttribute,
+    SizeChart, SizeInfo, CustomUnit, ProductBatchAttribute, StockHistory, FinancialSummary
+)
 
+from django.core.exceptions import PermissionDenied
 
 
 from customers.views import FlexiblePagination
@@ -26,13 +36,13 @@ from customers.views import FlexiblePagination
 from .models import (
     Product, ProductCategory, Stock, ProductBatch,
     AttributeType, AttributeValue, ProductAttribute,
-    SizeChart, SizeInfo, CustomUnit
+    SizeChart, SizeInfo, CustomUnit, ProductBatchAttribute, StockHistory
 )
 from .serializers import (
     ProductSerializer, ProductCategorySerializer, StockSerializer,
     ProductBatchSerializer, AttributeTypeSerializer, AttributeValueSerializer,
     ProductAttributeSerializer, SizeChartSerializer, SizeInfoSerializer,
-    ProductMultiSizeCreateSerializer, CustomUnitSerializer
+    ProductMultiSizeCreateSerializer, CustomUnitSerializer, StockHistorySerializer, FinancialSummarySerializer
 )
 
 from .filters import ProductFilter, ProductBatchFilter, StockFilter, SizeInfoFilter
@@ -53,9 +63,120 @@ def serve_media(request, path):
         raise Http404
 
 
-
+class StockHistoryViewSet(viewsets.ReadOnlyModelViewSet):
+    """Просмотр истории изменений запасов"""
+    serializer_class = StockHistorySerializer
+    permission_classes = [StorePermissionMixin]
+    
+    def get_queryset(self):
+        store = self.get_current_store()
+        return StockHistory.objects.filter(store=store).select_related(
+            'product', 'store', 'size', 'batch', 'user'
+        ).order_by('-timestamp')
+    
+    @action(detail=False, methods=['get'])
+    def trends(self, request):
+        """Тренды стока по продуктам"""
+        store = self.get_current_store()
+        days = int(request.query_params.get('days', 30))
+        
+        from django.db.models import Sum
+        from datetime import timedelta
+        
+        from_date = timezone.now() - timedelta(days=days)
+        
+        trends = StockHistory.objects.filter(
+            store=store,
+            timestamp__gte=from_date
+        ).values('product__id', 'product__name').annotate(
+            total_incoming=Sum('quantity_change', filter=models.Q(operation_type='INCOMING')),
+            total_sales=Sum('quantity_change', filter=models.Q(operation_type='SALE')),
+            net_change=Sum('quantity_change'),
+            days_with_stockout=Count('id', filter=models.Q(quantity_after=0)),
+        ).order_by('-net_change')
+        
+        return Response({
+            'store': store.name,
+            'period_days': days,
+            'trends': list(trends),
+            'summary': {
+                'total_movements': StockHistory.objects.filter(store=store, timestamp__gte=from_date).count(),
+                'stockout_rate': sum(t['days_with_stockout'] for t in trends) / days * 100
+            }
+        })
+    
+class SizeAnalyticsViewSet(viewsets.ViewSet):
+    """Аналитика по размерам товаров"""
+    def list(self, request):
+        """Аналитика по размерам: что продаётся лучше"""
+        store = self.get_current_store()
+        days = int(request.query_params.get('days', 30))
+        from_date = timezone.now() - timedelta(days=days)
+        
+        # Продажи по размерам
+        size_sales = TransactionItem.objects.filter(
+            transaction__store=store,
+            transaction__created_at__gte=from_date,
+            transaction__status='completed'
+        ).select_related('product', 'size_snapshot').values(
+            'size_snapshot'
+        ).annotate(
+            total_sold=Sum('quantity'),
+            revenue=Sum('price'),
+            items_sold=Count('id'),
+            unique_products=Count('product', distinct=True)
+        ).order_by('-total_sold')
+        
+        # Топ-3 размера
+        top_sizes = size_sales[:3]
+        
+        # Медленные размеры (низкий оборот)
+        slow_sizes = size_sales.filter(total_sold__lt=5)[-3:]  # Продано меньше 5
+        
+        return Response({
+            'period_days': days,
+            'top_sizes': list(top_sizes),
+            'slow_sizes': list(slow_sizes),
+            'size_summary': {
+                'total_items_sold': sum(s['total_sold'] for s in size_sales),
+                'total_revenue': sum(s['revenue'] for s in size_sales),
+                'avg_items_per_size': sum(s['total_sold'] for s in size_sales) / len(size_sales) if size_sales else 0,
+                'most_popular_size': top_sizes[0]['size_snapshot'] if top_sizes else None
+            },
+            'recommendations': self._size_recommendations(top_sizes, slow_sizes)
+        })
+    
+    def _size_recommendations(self, top, slow):
+        """Рекомендации по размерам"""
+        recs = []
+        
+        if top:
+            recs.append({
+                'type': 'stock_up',
+                'title': 'Увеличить сток популярных размеров',
+                'description': f"Размеры {', '.join(t['size_snapshot'].get('size', 'Unknown') for t in top[:2])} продаются лучше всего.",
+                'action': 'Заказать дополнительно 20-30% сверх текущего стока'
+            })
+        
+        if slow:
+            recs.append({
+                'type': 'clearance',
+                'title': 'Распродажа медленных размеров',
+                'description': f"Размеры {', '.join(s['size_snapshot'].get('size', 'Unknown') for s in slow)} продаются слабо.",
+                'action': 'Скидка 20-30% или бандлинг с популярными'
+            })
+        
+        return recs
 
 logger = logging.getLogger('inventory')
+
+class InventoryAnalyticsViewSet(viewsets.ViewSet):
+    """Полная аналитика по оборачиваемости запасов"""
+    def list(self, request):
+        products = Product.objects.filter(store=request.user.current_store)
+        turnover_data = [{'name': p.name, 'turnover': p.inventory_turnover()} for p in products]
+        return Response({'turnover': turnover_data})
+
 
 class CustomUnitViewSet(StoreViewSetMixin, ModelViewSet):
     """
@@ -247,155 +368,6 @@ class CustomPagination(LimitOffsetPagination):
             'previous': self.get_previous_link(),
             'results': data
         })
-
-# class ProductCategoryViewSet(StoreViewSetMixin, ModelViewSet):
-#     """
-#     ViewSet для управления категориями товаров
-#     """
-#     pagination_class = CustomPagination
-#     serializer_class = ProductCategorySerializer
-#     filter_backends = [SearchFilter, OrderingFilter]
-#     search_fields = ['name']
-#     ordering_fields = ['name', 'created_at']
-#     ordering = ['name']
-
-#     def get_current_store_safely(self):
-#         """Безопасное получение текущего магазина с комплексной обработкой ошибок"""
-#         try:
-#             current_store = self.get_current_store()
-#             if not current_store:
-#                 logger.warning(f"Не найден текущий магазин для пользователя {self.request.user.username}")
-#             return current_store
-#         except Exception as e:
-#             logger.error(f"Ошибка получения текущего магазина для пользователя {self.request.user.username}: {e}")
-#             return None
-
-#     def get_queryset(self):
-#         """Получение категорий с фильтрацией по текущему магазину"""
-#         current_store = self.get_current_store_safely()
-#         if current_store:
-#             return ProductCategory.objects.filter(store=current_store).select_related('store')
-#         return ProductCategory.objects.none()
-
-#     def list(self, request, *args, **kwargs):
-#         """Улучшенный метод list с комплексным логированием"""
-#         logger.info(f"📋 ЗАПРОС СПИСКА КАТЕГОРИЙ - Пользователь: {request.user.username}")
-
-#         current_store = self.get_current_store_safely()
-#         if not current_store:
-#             return Response({
-#                 'error': 'Текущий магазин недоступен',
-#                 'detail': 'Пользователь должен быть связан с активным магазином',
-#                 'results': [],
-#                 'count': 0
-#             }, status=status.HTTP_400_BAD_REQUEST)
-
-#         try:
-#             # Используем стандартную реализацию DRF list с нашим queryset
-#             response = super().list(request, *args, **kwargs)
-
-#             # Добавляем информацию о магазине в ответ
-#             if isinstance(response.data, dict):
-#                 response.data['store_info'] = {
-#                     'id': str(current_store.id),
-#                     'name': current_store.name
-#                 }
-
-#             logger.info(f"✅ Успешно возвращены категории для магазина: {current_store.name}")
-#             return response
-
-#         except Exception as e:
-#             logger.error(f"❌ Ошибка в списке категорий: {e}")
-#             return Response({
-#                 'error': 'Не удалось получить категории',
-#                 'detail': str(e)
-#             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-#     @action(detail=False, methods=['get'])
-#     def debug_info(self, request):
-#         """
-#         Упрощенный endpoint отладки с учетом безопасности
-#         Доступен только в режиме разработки
-#         """
-#         if not settings.DEBUG:
-#             return Response({
-#                 'error': 'Endpoint отладки доступен только в режиме разработки'
-#             }, status=status.HTTP_404_NOT_FOUND)
-
-#         # Проверка прав доступа
-#         if not request.user.is_staff:
-#             return Response({
-#                 'error': 'Недостаточно прав доступа'
-#             }, status=status.HTTP_403_FORBIDDEN)
-
-#         current_store = self.get_current_store_safely()
-
-#         debug_info = {
-#             'user_info': {
-#                 'username': request.user.username,
-#                 'user_id': request.user.id,
-#                 'is_authenticated': request.user.is_authenticated,
-#                 'is_staff': request.user.is_staff,
-#             },
-#             'store_info': {
-#                 'has_current_store': current_store is not None,
-#                 'store_id': str(current_store.id) if current_store else None,
-#                 'store_name': current_store.name if current_store else None,
-#             },
-#             'categories_info': {
-#                 'queryset_count': self.get_queryset().count(),
-#             }
-#         }
-
-#         # Добавляем детальную информацию о категориях, если магазин существует
-#         if current_store:
-#             try:
-#                 categories = ProductCategory.objects.filter(store=current_store)
-#                 debug_info['categories_info'].update({
-#                     'categories_count': categories.count(),
-#                     'categories_list': [
-#                         {
-#                             'id': cat.id,
-#                             'name': cat.name,
-#                             'created_at': cat.created_at.isoformat() if cat.created_at else None
-#                         }
-#                         for cat in categories[:10]  # Ограничиваем первыми 10 для производительности
-#                     ]
-#                 })
-#             except Exception as e:
-#                 debug_info['categories_info']['error'] = str(e)
-
-#         return Response(debug_info)
-
-#     def handle_exception(self, exc):
-#         """Кастомная обработка исключений с логированием"""
-#         logger.error(f"Исключение в ProductCategoryViewSet: {exc}")
-#         return super().handle_exception(exc)
-
-#     def perform_create(self, serializer):
-#         """Обеспечиваем создание категории для текущего магазина"""
-#         current_store = self.get_current_store_safely()
-#         if not current_store:
-#             raise ValidationError("Невозможно создать категорию без текущего магазина")
-
-#         serializer.save(store=current_store)
-#         logger.info(f"Создана категория '{serializer.instance.name}' для магазина '{current_store.name}'")
-
-#     def perform_update(self, serializer):
-#         """Логирование обновлений категорий"""
-#         old_name = serializer.instance.name
-#         serializer.save()
-#         new_name = serializer.instance.name
-
-#         if old_name != new_name:
-#             logger.info(f"Обновлена категория '{old_name}' на '{new_name}'")
-
-#     def perform_destroy(self, instance):
-#         """Логирование удаления категорий"""
-#         category_name = instance.name
-#         store_name = instance.store.name
-#         super().perform_destroy(instance)
-#         logger.info(f"Удалена категория '{category_name}' из магазина '{store_name}'")
 
 
 
@@ -627,7 +599,7 @@ class ProductCategoryViewSet(StoreViewSetMixin, ModelViewSet):
                             'name': cat.name,
                             'created_at': cat.created_at.isoformat() if cat.created_at else None
                         }
-                        for cat in active_categories[:5]
+                        for cat in active_categories[:5]  # Ограничиваем первыми 10 для производительности
                     ],
                     'deleted_categories': [
                         {
@@ -1023,164 +995,146 @@ class ProductViewSet(
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
-        """✅ ИСПРАВЛЕННОЕ создание товара с правильной последовательностью"""
-        barcode = request.data.get('barcode')
-        batch_info = request.data.pop('batch_info', {})
-        size_id = request.data.pop('size_id', None)
-
+        """✅ ПЕРЕРАБОТАННОЕ создание: вьюха передаёт всё сериализатору"""
+        # ✅ ЛОГИРОВАНИЕ: что пришло
+        logger.info(f"RAW REQUEST DATA: {request.data}")
+        
         # Получаем текущий магазин
         current_store = self.get_current_store() if hasattr(self, 'get_current_store') else getattr(request.user, 'current_store', None)
-
+        
         if not current_store:
             return Response({
-                'error': 'Магазин не определен. Переавторизуйтесь.',
-                'debug_info': {
-                    'user': request.user.username,
-                    'has_current_store': hasattr(request.user, 'current_store')
-                }
+                'error': 'Магазин не определен.',
+                'debug_info': {'user': request.user.username}
             }, status=status.HTTP_400_BAD_REQUEST)
-
-        # Проверяем существование товара по штрих-коду В ТЕКУЩЕМ МАГАЗИНЕ
+        
+        # ✅ ПРОВЕРКА ШТРИХ-КОДА (оставляем, но без кражи batch_info)
+        barcode = request.data.get('barcode')
         if barcode:
             existing_product = Product.objects.filter(
                 store=current_store,
                 barcode=barcode
             ).first()
-
+            
             if existing_product:
-                # Товар существует - добавляем партию
+                # Для существующего товара — только батч
+                batch_info = request.data.get('batch_info', {})
                 if batch_info:
-                    batch_data = {
-                        'product': existing_product.id,
-                        **batch_info
-                    }
-                    batch_serializer = ProductBatchSerializer(
-                        data=batch_data,
-                        context={'request': request}
-                    )
-                    if batch_serializer.is_valid():
-                        # perform_create в StoreViewSetMixin автоматически добавит store
-                        self.perform_create(batch_serializer)
-                        logger.info(f"✅ Batch added to existing product {existing_product.name}")
-                    else:
-                        return Response(
-                            {'batch_errors': batch_serializer.errors},
-                            status=status.HTTP_400_BAD_REQUEST
-                        )
-
+                    return self._create_batch_for_existing_product(existing_product, batch_info, request)
+                
                 serializer = self.get_serializer(existing_product)
                 return Response({
                     'product': serializer.data,
-                    'message': _('Партия добавлена к существующему товару'),
-                    'action': 'batch_added'
+                    'message': 'Товар уже существует',
+                    'action': 'product_exists'
                 }, status=status.HTTP_200_OK)
-
-        # ✅ СОЗДАЕМ НОВЫЙ ТОВАР - ПРАВИЛЬНАЯ ПОСЛЕДОВАТЕЛЬНОСТЬ
-
-        # 1. Валидируем данные
+        
+        # ✅ НОВЫЙ ТОВАР: передаём ВСЁ сериализатору
         serializer = self.get_serializer(data=request.data)
+        serializer.context['request'] = request
+        serializer.context['store'] = current_store
+        
         if not serializer.is_valid():
+            logger.error(f"VALIDATION ERRORS: {serializer.errors}")
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        # 2. Создаем товар через perform_create (установит store автоматически)
-        self.perform_create(serializer)
-        product = serializer.instance
-
-        # 3. Теперь у product есть store, можем создать Stock вручную если нужно
-        if not hasattr(product, 'stock'):
-            try:
-                Stock.objects.create(
-                    product=product,
-                    store=product.store,  # ← Теперь у product точно есть store
-                    quantity=0
-                )
-                logger.info(f"✅ Stock manually created for {product.name}")
-            except Exception as e:
-                logger.error(f"❌ Error creating stock: {str(e)}")
-
-        # 4. Обрабатываем размер
-        if size_id:
-            try:
-                size_instance = SizeInfo.objects.get(id=size_id)
-                product.size = size_instance
-                product.save()
-                logger.info(f"✅ Size {size_instance.size} set for {product.name}")
-            except SizeInfo.DoesNotExist:
-                return Response(
-                    {'size_error': _('Размерная информация не найдена')},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-        # 5. Создаем партию если указана
-        if batch_info:
-            batch_data = {
-                'product': product.id,
-                **batch_info
-            }
-            batch_serializer = ProductBatchSerializer(
-                data=batch_data,
-                context={'request': request}
-            )
-            if batch_serializer.is_valid():
-                batch_viewset = ProductBatchViewSet()
-                batch_viewset.request = request
-                batch = batch_serializer.save(store=product.store)
-                
-                # ✅ ИСПРАВЛЕННАЯ обработка атрибутов для одиночного создания
-                # Проверяем два варианта: 'attributes' (массив) или 'attribute' (одиночный)
-                attributes_data = []
-                
-                # Вариант 1: attributes (для multi-size создания)
-                if 'attributes' in batch_info:
-                    attributes_data = batch_info['attributes']
-                
-                # Вариант 2: attribute (для одиночного создания)
-                elif 'attribute' in batch_info:
-                    attr_info = batch_info['attribute']
-                    # Для одиночного атрибута используем все количество партии
-                    attributes_data = [{
-                        'attribute_value_id': attr_info['id'],
-                        'quantity': batch.quantity  # Берем все количество партии
-                    }]
-                
-                # Создаем атрибуты
-                for attr_data in attributes_data:
-                    try:
-                        # Создаем ProductAttribute для товара
-                        prod_attr, created = ProductAttribute.objects.get_or_create(
-                            product=product,
-                            attribute_value_id=attr_data['attribute_value_id']
-                        )
-                        
-                        # Создаем ProductBatchAttribute
-                        ProductBatchAttribute.objects.create(
-                            batch=batch,
-                            product_attribute=prod_attr,
-                            quantity=attr_data['quantity'],
-                            store=product.store
-                        )
-                        
-                        logger.info(f"Created attribute {attr_data['attribute_value_id']} for batch {batch.id}")
-                        
-                    except Exception as e:
-                        logger.error(f"Error creating batch attribute: {e}")
-                
-                logger.info(f"Batch created for new product {product.name}")
-            
-        # 6. Генерируем этикетку
+        
+        # ✅ Сериализатор создаёт товар + батч + атрибуты + сток
+        product = serializer.save()
+        logger.info(f"✅ Товар создан сериализатором: {product.name} (ID: {product.id})")
+        
+        # ✅ Финальная обработка (только этикетка)
         try:
-            product.generate_label()
-            logger.info(f"✅ Label generated for {product.name}")
+            if hasattr(product, 'generate_label'):
+                product.generate_label()
+                logger.info(f"✅ Этикетка сгенерирована для {product.name}")
         except Exception as e:
-            logger.error(f"⚠️ Label generation failed: {str(e)}")
-
-        # 7. Возвращаем результат
-        updated_serializer = self.get_serializer(product)
+            logger.warning(f"⚠️ Ошибка генерации этикетки: {e}")
+        
+        # ✅ Возвращаем полный ответ
+        updated_serializer = self.get_serializer(product, context={'request': request})
         return Response({
             'product': updated_serializer.data,
-            'message': _('Товар успешно создан'),
+            'message': 'Товар успешно создан',
             'action': 'product_created'
         }, status=status.HTTP_201_CREATED)
+    
+    def _create_batch_for_existing_product(self, product, batch_info, request):
+        """✅ Создание батча для существующего товара"""
+        batch_data = {'product': product.id, **batch_info}
+        batch_serializer = ProductBatchSerializer(
+            data=batch_data,
+            context={'request': request}
+        )
+        
+        if batch_serializer.is_valid():
+            batch = batch_serializer.save(store=product.store)
+            logger.info(f"✅ Батч создан для существующего товара {product.name}")
+            
+            # ✅ Обработка атрибутов для существующего товара
+            self._create_batch_attributes(batch, batch_info, product)
+            
+            return Response({
+                'product': self.get_serializer(product).data,
+                'batch': ProductBatchSerializer(batch).data,
+                'message': 'Партия добавлена к существующему товару',
+                'action': 'batch_added'
+            }, status=status.HTTP_201_CREATED)
+        
+        return Response({'batch_errors': batch_serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+    
+    def _create_batch_attributes(self, batch, batch_info, product):
+        """✅ Универсальное создание атрибутов батча"""
+        attributes_data = []
+        
+        # Поддержка обоих форматов
+        if 'attributes' in batch_info and isinstance(batch_info['attributes'], list):
+            attributes_data = batch_info['attributes']
+        elif 'attribute' in batch_info:
+            attr_info = batch_info['attribute']
+            attr_value_id = attr_info.get('attribute_value_id') or attr_info.get('id')
+            if attr_value_id:
+                attributes_data = [{
+                    'attribute_value_id': attr_value_id,
+                    'quantity': batch.quantity  # Весь quantity батча
+                }]
+        
+        if not attributes_data:
+            logger.info(f"Нет атрибутов для батча {batch.id}")
+            return
+        
+        # Создаём атрибуты
+        created_count = 0
+        for attr_data in attributes_data:
+            try:
+                attr_value_id = attr_data['attribute_value_id']
+                quantity = attr_data['quantity']
+                
+                # Проверяем существование AttributeValue
+                if not AttributeValue.objects.filter(id=attr_value_id).exists():
+                    logger.warning(f"AttributeValue {attr_value_id} не найден")
+                    continue
+                
+                # ProductAttribute
+                prod_attr, created = ProductAttribute.objects.get_or_create(
+                    product=product,
+                    attribute_value_id=attr_value_id
+                )
+                
+                # ProductBatchAttribute
+                ProductBatchAttribute.objects.create(
+                    batch=batch,
+                    product_attribute=prod_attr,
+                    quantity=quantity,
+                    store=product.store
+                )
+                
+                created_count += 1
+                logger.info(f"✅ Атрибут {attr_value_id} создан для батча {batch.id}")
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка создания атрибута {attr_data}: {e}")
+        
+        logger.info(f"Создано атрибутов для батча {batch.id}: {created_count}")
 
     @transaction.atomic
     def update(self, request, *args, **kwargs):
@@ -2185,6 +2139,7 @@ class SizeInfoViewSet(StoreViewSetMixin, ModelViewSet):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         serializer = self.get_serializer(data=request.data)
+
         if serializer.is_valid():
             # Автоматически привязываем к текущему магазину
             size_info = serializer.save(store=current_store)
@@ -2628,3 +2583,618 @@ def product_label_proxy(request, pk):
     response = FileResponse(open(file_path, "rb"), content_type="image/png")
     response["Access-Control-Allow-Origin"] = "*"   # 🔑 главное!
     return response
+
+
+class PaymentAnalyticsViewSet(viewsets.ViewSet):
+    permission_classes = [IsAuthenticated, StorePermissionMixin]
+    
+    def list(self, request):
+        """Аналитика по методам оплаты за период"""
+        store = self.get_current_store()
+        days = int(request.query_params.get('days', 30))
+        from_date = timezone.now() - timedelta(days=days)
+        
+        # Группируем транзакции по методам
+        payments = Transaction.objects.filter(
+            store=store,
+            created_at__gte=from_date,
+            status='completed'
+        ).values('payment_method').annotate(
+            count=Count('id'),
+            total_amount=Sum('total_amount'),
+            cash_amount=Sum('cash_amount'),
+            transfer_amount=Sum('transfer_amount'),
+            card_amount=Sum('card_amount'),
+            avg_amount=Avg('total_amount')
+        ).order_by('-total_amount')
+        
+        # Дополнительно: по времени суток
+        hourly = Transaction.objects.filter(
+            store=store,
+            created_at__gte=from_date
+        ).extra(
+            select={'hour': 'EXTRACT(hour FROM created_at)'}
+        ).values('hour').annotate(
+            count=Count('id'),
+            total=Sum('total_amount')
+        ).order_by('hour')
+        
+        return Response({
+            'store': store.name,
+            'period_days': days,
+            'payment_methods': list(payments),
+            'payment_summary': {
+                'total_transactions': Transaction.objects.filter(
+                    store=store, created_at__gte=from_date, status='completed'
+                ).count(),
+                'grand_total': Transaction.objects.filter(
+                    store=store, created_at__gte=from_date, status='completed'
+                ).aggregate(total=Sum('total_amount'))['total'] or 0,
+                'cash_preference': sum(p['cash_amount'] for p in payments) / sum(p['total_amount'] for p in payments) * 100 if payments else 0
+            },
+            'hourly_pattern': list(hourly),
+            'insights': self._generate_payment_insights(payments)
+        })
+    
+    def _generate_payment_insights(self, payments_data):
+        """Генерируем инсайты по платежам"""
+        if not payments_data:
+            return []
+        
+        total = sum(p['total_amount'] for p in payments_data)
+        cash_dominant = next((p for p in payments_data if p['payment_method'] == 'cash'), None)
+        
+        insights = []
+        
+        if cash_dominant and cash_dominant['total_amount'] / total > 0.7:
+            insights.append({
+                'type': 'cash_heavy',
+                'title': 'Наличные доминируют',
+                'description': f"{cash_dominant['total_amount']/total*100:.1f}% продаж — наличными. Рассмотрите POS-терминалы.",
+                'priority': 'medium'
+            })
+        
+        card_data = next((p for p in payments_data if p['payment_method'] == 'card'), None)
+        if card_data and card_data['count'] < 5:  # Мало картой
+            insights.append({
+                'type': 'low_card_usage',
+                'title': 'Низкое использование карт',
+                'description': f"Только {card_data['count']} картовых транзакций. Возможно, нужна реклама безналичной оплаты.",
+                'priority': 'high'
+            })
+        
+        return insights
+    
+from stores.services.store_access_service import store_access_service
+
+class FinancialSummaryViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = FinancialSummarySerializer
+    # ✅ ИЗМЕНИЛ ТОЛЬКО ЭТУ СТРОКУ:
+    permission_classes = [StorePermissionWrapper]  # ← Обёртка!
+    
+    def get_queryset(self):
+        """Теперь current_store доступен из обёртки"""
+        store = store_access_service.get_current_store(self.request.user, self.request)
+
+        if not store:
+            raise PermissionDenied("Магазин не определён")
+        
+        return FinancialSummary.objects.filter(store=store).order_by('-date')
+    
+    def list(self, request, *args, **kwargs):
+        """✅ СПИСОК ФИНАНСОВЫХ СВОДОК — календарь бизнеса"""
+        store = store_access_service.get_current_store(self.request.user, self.request)
+        days = int(request.query_params.get('days', 30))
+        date_from = request.query_params.get('date_from')
+        
+        queryset = self.get_queryset()
+        
+        # Фильтр по периоду
+        if days:
+            from_date = timezone.now() - timedelta(days=days)
+            queryset = queryset.filter(date__gte=from_date.date())
+        elif date_from:
+            from django.utils.dateparse import parse_date
+            try:
+                from_date = parse_date(date_from)
+                queryset = queryset.filter(date__gte=from_date)
+            except ValueError:
+                return Response(
+                    {'error': 'Неверный формат даты. Используйте YYYY-MM-DD'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        # Сериализуем
+        summaries = self.get_serializer(queryset, many=True).data
+        
+        # Дополнительная аналитика
+        total_revenue = sum(s['grand_total'] for s in summaries)
+        avg_daily_revenue = total_revenue / len(summaries) if summaries else 0
+        cash_dominance = sum(s['cash_total'] for s in summaries) / total_revenue * 100 if total_revenue else 0
+        
+        return Response({
+            'store': store.name,
+            'period_days': days if days else 'custom',
+            'summaries': summaries,
+            'summary_stats': {
+                'total_days': len(summaries),
+                'total_revenue': float(total_revenue),
+                'avg_daily_revenue': float(avg_daily_revenue),
+                'cash_dominance': round(cash_dominance, 1),
+                'margin_trend': self._calculate_margin_trend(summaries)
+            },
+            'insights': self._generate_financial_insights(summaries)
+        })
+    
+    def retrieve(self, request, *args, **kwargs):
+        """✅ ДЕТАЛИ КОНКРЕТНОГО ДНЯ — глубокий анализ"""
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        
+        # Дополнительные метрики для дня
+        day_data = self._get_detailed_day_metrics(instance.date, instance.store)
+        
+        return Response({
+            'daily_summary': serializer.data,
+            'detailed_metrics': day_data,
+            'trends': self._get_short_term_trends(instance.store, instance.date)
+        })
+    
+    @action(detail=False, methods=['get'])
+    def trends(self, request):
+        """✅ ТРЕНДЫ ФИНАНСОВЫХ ПОКАЗАТЕЛЕЙ — графики для дашборда"""
+        store = store_access_service.get_current_store(self.request.user, self.request)
+        days = int(request.query_params.get('days', 90))
+        
+        from_date = timezone.now() - timedelta(days=days)
+        summaries = FinancialSummary.objects.filter(
+            store=store,
+            date__gte=from_date.date()
+        ).order_by('date')
+        
+        if not summaries.exists():
+            return Response({'error': 'Нет данных за указанный период'}, status=404)
+        
+        # Строим тренды
+        trend_data = []
+        for summary in summaries:
+            trend_data.append({
+                'date': summary.date.strftime('%Y-%m-%d'),
+                'revenue': float(summary.grand_total),
+                'cash': float(summary.cash_total),
+                'card': float(summary.card_total),
+                'margin': float(summary.total_margin),
+                'transactions': summary.total_transactions,
+                'avg_check': float(summary.avg_transaction),
+                'cash_percentage': summary.get_cash_percentage(),
+                'margin_percentage': float(summary.margin_percentage)
+            })
+        
+        # Тренды по периодам (неделя/месяц)
+        weekly_trend = self._aggregate_by_period(summaries, days=7, period='week')
+        monthly_trend = self._aggregate_by_period(summaries, days=30, period='month')
+        
+        return Response({
+            'store': store.name,
+            'period_days': days,
+            'daily_trend': trend_data,
+            'weekly_trend': weekly_trend,
+            'monthly_trend': monthly_trend,
+            'predictions': self._simple_trend_prediction(trend_data)
+        })
+    
+    @action(detail=False, methods=['get'])
+    def payment_methods(self, request):
+        """✅ АНАЛИТИКА ПО МЕТОДАМ ОПЛАТЫ — где твои деньги"""
+        store = store_access_service.get_current_store(self.request.user, self.request)
+        days = int(request.query_params.get('days', 30))
+        
+        from_date = timezone.now() - timedelta(days=days)
+        
+        # Группируем по методам оплаты (из Transaction, а не Summary)
+        from sales.models import Transaction
+        
+        payment_data = Transaction.objects.filter(
+            store=store,
+            created_at__gte=from_date,
+            status='completed'
+        ).values('payment_method').annotate(
+            count=Count('id'),
+            total_amount=Sum('total_amount'),
+            cash_amount=Sum('cash_amount'),
+            card_amount=Sum('card_amount'),
+            transfer_amount=Sum('transfer_amount'),
+            avg_amount=Avg('total_amount')
+        ).order_by('-total_amount')
+        
+        # Процентное соотношение
+        total_revenue = sum(p['total_amount'] for p in payment_data)
+        for payment in payment_data:
+            payment['percentage'] = round((payment['total_amount'] / total_revenue * 100), 1) if total_revenue else 0
+        
+        # Пиковые часы
+        hourly_data = Transaction.objects.filter(
+            store=store,
+            created_at__gte=from_date
+        ).extra(
+            select={'hour': 'EXTRACT(hour FROM created_at)'}
+        ).values('hour').annotate(
+            count=Count('id'),
+            revenue=Sum('total_amount')
+        ).order_by('hour')
+        
+        return Response({
+            'store': store.name,
+            'period_days': days,
+            'payment_methods': list(payment_data),
+            'hourly_pattern': list(hourly_data),
+            'insights': self._payment_method_insights(payment_data)
+        })
+    
+    @action(detail=False, methods=['get'])
+    def cashiers(self, request):
+        """✅ АНАЛИТИКА ПО КАССИРАМ — кто твоя звезда продаж"""
+        store = store_access_service.get_current_store(self.request.user, self.request)
+        days = int(request.query_params.get('days', 30))
+        
+        from sales.models import Transaction
+        from django.contrib.auth.models import User
+        
+        from_date = timezone.now() - timedelta(days=days)
+        
+        # Продажи по кассирам
+        cashier_data = Transaction.objects.filter(
+            store=store,
+            created_at__gte=from_date,
+            status='completed',
+            cashier__isnull=False
+        ).values(
+            'cashier_id', 
+            cashier_name=F('cashier__first_name')
+        ).annotate(
+            full_name=Concat(F('cashier__first_name'), Value(' '), F('cashier__last_name')),
+            transactions=Count('id'),
+            total_revenue=Sum('total_amount'),
+            avg_transaction=Avg('total_amount'),
+            items_sold=Sum('items__quantity', filter=Q(items__isnull=False))
+        ).order_by('-total_revenue')
+        
+        # Топ-3 кассира
+        top_cashiers = cashier_data[:3]
+        
+        # Рейтинг производительности
+        if cashier_data:
+            max_revenue = cashier_data[0]['total_revenue']
+            for cashier in cashier_data:
+                cashier['performance_score'] = round((cashier['total_revenue'] / max_revenue) * 100, 1)
+        
+        return Response({
+            'store': store.name,
+            'period_days': days,
+            'cashiers': list(cashier_data),
+            'top_performers': list(top_cashiers),
+            'performance_insights': self._cashier_insights(cashier_data)
+        })
+    
+    @action(detail=False, methods=['get'])
+    def margins(self, request):
+        """✅ АНАЛИТИКА МАРЖИ — где твоя прибыль"""
+        store = store_access_service.get_current_store(self.request.user, self.request)
+        days = int(request.query_params.get('days', 30))
+        
+        from_date = timezone.now() - timedelta(days=days)
+        summaries = FinancialSummary.objects.filter(
+            store=store,
+            date__gte=from_date.date()
+        )
+        
+        # Маржинальность по дням
+        margin_data = []
+        for summary in summaries:
+            margin_data.append({
+                'date': summary.date.strftime('%Y-%m-%d'),
+                'revenue': float(summary.grand_total),
+                'margin_amount': float(summary.total_margin),
+                'margin_percentage': float(summary.margin_percentage),
+                'cost_of_goods': float(summary.grand_total - summary.total_margin)
+            })
+        
+        # Средние показатели
+        avg_margin = sum(m['margin_percentage'] for m in margin_data) / len(margin_data) if margin_data else 0
+        profitable_days = len([m for m in margin_data if m['margin_percentage'] > 30])
+        
+        return Response({
+            'store': store.name,
+            'period_days': days,
+            'margin_data': margin_data,
+            'summary': {
+                'avg_margin_percentage': round(avg_margin, 1),
+                'profitable_days': profitable_days,
+                'profitability_rate': round((profitable_days / len(margin_data) * 100), 1) if margin_data else 0,
+                'total_profit': sum(m['margin_amount'] for m in margin_data)
+            },
+            'recommendations': self._margin_recommendations(avg_margin, margin_data)
+        })
+    
+    # Вспомогательные методы
+    def _calculate_margin_trend(self, summaries):
+        """Расчёт тренда маржинальности"""
+        if len(summaries) < 7:
+            return 'insufficient_data'
+        
+        recent_margins = [s['margin_percentage'] for s in summaries[-7:]]  # Последние 7 дней
+        earlier_margins = [s['margin_percentage'] for s in summaries[:7]]  # Первые 7 дней
+        
+        recent_avg = sum(recent_margins) / len(recent_margins)
+        earlier_avg = sum(earlier_margins) / len(earlier_margins)
+        
+        if recent_avg > earlier_avg * 1.05:
+            return 'improving'
+        elif recent_avg < earlier_avg * 0.95:
+            return 'declining'
+        else:
+            return 'stable'
+    
+    def _generate_financial_insights(self, summaries):
+        """Генерация инсайтов по финансам"""
+        if not summaries:
+            return []
+        
+        insights = []
+        total_revenue = sum(s['grand_total'] for s in summaries)
+        avg_transaction = sum(s['avg_transaction'] * s['total_transactions'] for s in summaries) / sum(s['total_transactions'] for s in summaries)
+        
+        # Инсайт по среднему чеку
+        if avg_transaction < 50000:  # Пример порога
+            insights.append({
+                'type': 'low_avg_check',
+                'title': 'Низкий средний чек',
+                'description': f"Средний чек {avg_transaction:,.0f} сум. Рассмотрите апселлинг или бандлинг.",
+                'priority': 'medium',
+                'action': 'Добавить сопутствующие товары в чек'
+            })
+        
+        # Инсайт по марже
+        avg_margin = sum(s['margin_percentage'] for s in summaries) / len(summaries)
+        if avg_margin < 30:
+            insights.append({
+                'type': 'low_margin',
+                'title': 'Низкая маржинальность',
+                'description': f"Средняя маржа {avg_margin:.1f}%. Проверьте закупочные цены.",
+                'priority': 'high',
+                'action': 'Анализ цен поставщиков'
+            })
+        
+        # Инсайт по дням недели
+        weekday_revenue = {}
+        for summary in summaries:
+            weekday = summary['date'].strftime('%A')  # Monday, Tuesday...
+            if weekday not in weekday_revenue:
+                weekday_revenue[weekday] = 0
+            weekday_revenue[weekday] += summary['grand_total']
+        
+        best_day = max(weekday_revenue, key=weekday_revenue.get)
+        if weekday_revenue.get(best_day, 0) > total_revenue * 0.25:  # Один день > 25%
+            insights.append({
+                'type': 'peak_day',
+                'title': f'Пик продаж в {best_day.lower()}',
+                'description': f"{best_day} приносит {weekday_revenue[best_day]/total_revenue*100:.1f}% выручки.",
+                'priority': 'low',
+                'action': 'Усилить маркетинг в этот день'
+            })
+        
+        return insights
+    
+    def _payment_method_insights(self, payment_data):
+        """Инсайты по методам оплаты"""
+        if not payment_data:
+            return []
+        
+        total = sum(p['total_amount'] for p in payment_data)
+        cash_payment = next((p for p in payment_data if p['payment_method'] == 'cash'), None)
+        
+        insights = []
+        
+        if cash_payment and cash_payment['total_amount'] / total > 0.7:
+            insights.append({
+                'type': 'cash_dominant',
+                'title': 'Наличные доминируют',
+                'description': f"{cash_payment['total_amount']/total*100:.1f}% — наличными. Рассмотрите POS-терминалы.",
+                'priority': 'medium'
+            })
+        
+        card_payment = next((p for p in payment_data if p['payment_method'] == 'card'), None)
+        if card_payment and card_payment['count'] < total * 0.1:  # Меньше 10% транзакций картой
+            insights.append({
+                'type': 'low_card_adoption',
+                'title': 'Низкое использование карт',
+                'description': f"Только {card_payment['count']} картовых платежей. Обучите клиентов.",
+                'priority': 'high'
+            })
+        
+        return insights
+    
+    def _cashier_insights(self, cashier_data):
+        """Инсайты по кассирам"""
+        if not cashier_data:
+            return []
+        
+        insights = []
+        top_cashier = cashier_data[0]
+        bottom_cashier = cashier_data[-1] if len(cashier_data) > 1 else None
+        
+        # Топ кассир
+        insights.append({
+            'type': 'top_performer',
+            'title': f'Звезда продаж: {top_cashier["full_name"]}',
+            'description': f"{top_cashier['total_revenue']:,.0f} сум за период. Продуктивность {top_cashier['performance_score']}%",
+            'priority': 'positive'
+        })
+        
+        # Если есть слабый кассир
+        if bottom_cashier and len(cashier_data) > 1:
+            performance_gap = top_cashier['performance_score'] - bottom_cashier['performance_score']
+            if performance_gap > 30:  # Разница больше 30%
+                insights.append({
+                    'type': 'underperformer',
+                    'title': f'Нужна поддержка: {bottom_cashier["full_name"]}',
+                    'description': f"Продуктивность {bottom_cashier['performance_score']}%. Разница с лидером: {performance_gap}%",
+                    'priority': 'medium',
+                    'action': 'Дополнительное обучение или смена смены'
+                })
+        
+        # Общая продуктивность
+        avg_performance = sum(c['performance_score'] for c in cashier_data) / len(cashier_data)
+        if avg_performance < 70:
+            insights.append({
+                'type': 'team_productivity',
+                'title': 'Командная продуктивность ниже нормы',
+                'description': f"Средний показатель {avg_performance:.1f}%. Рассмотрите мотивацию.",
+                'priority': 'high'
+            })
+        
+        return insights
+    
+    def _margin_recommendations(self, avg_margin, margin_data):
+        """Рекомендации по марже"""
+        recommendations = []
+        
+        if avg_margin < 25:
+            recommendations.append({
+                'type': 'urgent',
+                'title': 'Критическая маржинальность',
+                'description': f"Средняя маржа {avg_margin:.1f}% — ниже целевого уровня 30%.",
+                'actions': [
+                    'Пересмотр закупочных цен',
+                    'Анализ цен конкурентов',
+                    'Оптимизация ассортимента'
+                ]
+            })
+        elif avg_margin < 35:
+            recommendations.append({
+                'type': 'warning',
+                'title': 'Маржа требует внимания',
+                'description': f"Маржа {avg_margin:.1f}% — приемлемо, но есть потенциал роста.",
+                'actions': [
+                    'Анализ маржинальности по категориям',
+                    'Увеличение цен на товары с высокой маржей',
+                    'Снижение цен на товары с низкой оборачиваемостью'
+                ]
+            })
+        else:
+            recommendations.append({
+                'type': 'success',
+                'title': 'Отличная маржинальность',
+                'description': f"Маржа {avg_margin:.1f}% — выше среднего по рынку.",
+                'actions': [
+                    'Сохранение текущей стратегии',
+                    'Инвестирование прибыли в маркетинг',
+                    'Расширение ассортимента'
+                ]
+            })
+        
+        # Волатильность маржи
+        if len(margin_data) > 7:
+            margins = [m['margin_percentage'] for m in margin_data[-7:]]
+            margin_std = (sum((m - avg_margin) ** 2 for m in margins) / len(margins)) ** 0.5
+            if margin_std > 10:
+                recommendations.append({
+                    'type': 'volatility',
+                    'title': 'Нестабильная маржинальность',
+                    'description': f"Колебания маржи ±{margin_std:.1f}%. Нужен контроль затрат.",
+                    'actions': ['Ежедневный мониторинг', 'Фиксация закупочных цен']
+                })
+        
+        return recommendations
+    
+    def _aggregate_by_period(self, summaries, days, period):
+        """Агрегация по периодам"""
+        # Простая группировка по неделям/месяцам
+        aggregated = []
+        for i in range(0, len(summaries), 7 if period == 'week' else 30):
+            period_summaries = summaries[i:i+7 if period == 'week' else 30]
+            if period_summaries:
+                aggregated.append({
+                    'period_start': period_summaries[0].date.strftime('%Y-%m-%d'),
+                    'period_end': period_summaries[-1].date.strftime('%Y-%m-%d'),
+                    'revenue': sum(s.grand_total for s in period_summaries),
+                    'margin': sum(s.total_margin for s in period_summaries),
+                    'transactions': sum(s.total_transactions for s in period_summaries),
+                    'avg_daily_revenue': sum(s.grand_total for s in period_summaries) / len(period_summaries)
+                })
+        
+        return aggregated
+    
+    def _simple_trend_prediction(self, trend_data):
+        """Простой прогноз тренда"""
+        if len(trend_data) < 7:
+            return {'error': 'Недостаточно данных для прогноза'}
+        
+        # Линейная регрессия (упрощённая)
+        x = list(range(len(trend_data)))
+        y = [d['revenue'] for d in trend_data]
+        
+        # Средний рост
+        avg_growth = sum(y[i+1] - y[i] for i in range(len(y)-1)) / (len(y)-1) if len(y) > 1 else 0
+        
+        # Прогноз на 7 дней
+        last_revenue = y[-1]
+        forecast = [last_revenue + (i+1) * avg_growth for i in range(7)]
+        
+        return {
+            'current_trend': 'growing' if avg_growth > 0 else 'declining' if avg_growth < 0 else 'stable',
+            'avg_daily_growth': float(avg_growth),
+            'next_7_days_forecast': [float(f) for f in forecast],
+            'confidence': 'medium'  # Для простой модели
+        }
+    
+    def _get_detailed_day_metrics(self, date, store):
+        """Детальные метрики за день"""
+        from sales.models import Transaction
+        
+        transactions = Transaction.objects.filter(
+            store=store,
+            created_at__date=date,
+            status='completed'
+        )
+        
+        return {
+            'total_transactions': transactions.count(),
+            'unique_customers': transactions.values('customer').distinct().count(),
+            'peak_hour': transactions.extra(
+                select={'hour': 'EXTRACT(hour FROM created_at)'}
+            ).values('hour').annotate(count=Count('id')).order_by('-count').first(),
+            'avg_transaction_time': transactions.aggregate(avg_duration=Avg('duration')) if hasattr(Transaction, 'duration') else None,
+            'payment_mix': {
+                'cash': float(transactions.aggregate(Sum('cash_amount'))['cash_amount__sum'] or 0),
+                'card': float(transactions.aggregate(Sum('card_amount'))['card_amount__sum'] or 0),
+                'transfer': float(transactions.aggregate(Sum('transfer_amount'))['transfer_amount__sum'] or 0)
+            }
+        }
+    
+    def _get_short_term_trends(self, store, target_date):
+        """Короткие тренды вокруг целевой даты"""
+        week_ago = target_date - timedelta(days=7)
+        week_later = target_date + timedelta(days=7)
+        
+        summaries = FinancialSummary.objects.filter(
+            store=store,
+            date__range=[week_ago, week_later]
+        ).order_by('date')
+        
+        if not summaries.exists():
+            return {}
+        
+        # Сравнение с аналогичным периодом
+        same_week_last_month = [
+            s for s in summaries 
+            if s.date.month == target_date.month - 1 or (s.date.month == 12 and target_date.month == 1)
+        ]
+        
+        return {
+            'week_comparison': {
+                'current_week_revenue': sum(s.grand_total for s in summaries),
+                'same_week_last_month': sum(s.grand_total for s in same_week_last_month) if same_week_last_month else 0,
+                'growth_percentage': 0  # Рассчитать, если есть данные
+            }
+        }

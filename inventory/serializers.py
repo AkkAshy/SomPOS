@@ -10,13 +10,159 @@ from .models import (Product, ProductCategory, Stock,
                      ProductBatch, AttributeType,
                      AttributeValue, ProductAttribute,
                      SizeChart, SizeInfo, CustomUnit,
-                     ProductBatchAttribute
+                     ProductBatchAttribute, StockHistory,
+                     FinancialSummary
                      )
 from users.serializers import UserSerializer
 import logging
 from stores.mixins import StoreSerializerMixin
 
+
 logger = logging.getLogger('inventory')
+
+
+class StockHistorySerializer(serializers.ModelSerializer):
+    """
+    ✅ СЕРИАЛИЗАТОР ДЛЯ StockHistory — полный доступ к истории стока
+    """
+    # Читаемые поля — для удобства в API
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    store_name = serializers.CharField(source='store.name', read_only=True)
+    size_name = serializers.CharField(source='size.size', read_only=True, allow_null=True)
+    cashier_name = serializers.CharField(source='user.get_full_name', read_only=True, allow_null=True)
+    batch_name = serializers.CharField(source='batch.supplier', read_only=True, allow_null=True)
+    
+    # Форматированные поля
+    timestamp_formatted = serializers.DateTimeField(
+        source='timestamp', 
+        format='%Y-%m-%d %H:%M:%S', 
+        read_only=True
+    )
+    date_only_formatted = serializers.DateField(
+        source='date_only', 
+        format='%Y-%m-%d', 
+        read_only=True
+    )
+    
+    # Финансовые метрики (вычисляемые)
+    line_value = serializers.SerializerMethodField()
+    margin = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = StockHistory
+        fields = [
+            'id', 'timestamp', 'timestamp_formatted', 'date_only', 'date_only_formatted',
+            'product', 'product_name', 'store', 'store_name', 
+            'batch', 'batch_name', 'size', 'size_name',
+            'operation_type', 'quantity_before', 'quantity_after', 
+            'quantity_change', 'line_value', 'margin',
+            'reference_id', 'user', 'cashier_name', 'notes', 'is_automatic'
+        ]
+        read_only_fields = [
+            'id', 'timestamp', 'date_only', 'quantity_before', 'quantity_after',
+            'quantity_change', 'reference_id', 'user', 'is_automatic'
+        ]
+        extra_kwargs = {
+            'product': {'read_only': True},
+            'store': {'read_only': True},
+            'batch': {'read_only': True},
+            'size': {'read_only': True},
+        }
+    
+    def get_line_value(self, obj):
+        """✅ Вычисляемая стоимость операции"""
+        if obj.operation_type == 'SALE':
+            return float(obj.quantity_change * -1 * obj.sale_price_at_time) if obj.sale_price_at_time else 0
+        elif obj.operation_type == 'INCOMING':
+            return float(obj.quantity_change * obj.purchase_price_at_time) if obj.purchase_price_at_time else 0
+        return 0
+    
+    def get_margin(self, obj):
+        """✅ Маржа операции (для продаж)"""
+        if obj.operation_type == 'SALE' and obj.sale_price_at_time and obj.purchase_price_at_time:
+            qty_sold = abs(obj.quantity_change)
+            revenue = qty_sold * obj.sale_price_at_time
+            cost = qty_sold * obj.purchase_price_at_time
+            return float((revenue - cost) / revenue * 100) if revenue > 0 else 0
+        return None
+
+
+class StockHistorySummarySerializer(serializers.Serializer):
+    """
+    ✅ СВОДКА ПО ИСТОРИИ СТОКА — для дашбордов
+    """
+    period_days = serializers.IntegerField()
+    date_from = serializers.DateField()
+    date_to = serializers.DateField()
+    
+    # Метрики
+    total_movements = serializers.IntegerField()
+    total_incoming = serializers.DecimalField(max_digits=12, decimal_places=3)
+    total_sales = serializers.DecimalField(max_digits=12, decimal_places=3)
+    net_stock_change = serializers.DecimalField(max_digits=12, decimal_places=3)
+    current_stock = serializers.DecimalField(max_digits=12, decimal_places=3)
+    
+    # Финансовые
+    total_revenue = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_cost = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_margin = serializers.DecimalField(max_digits=12, decimal_places=2)
+    margin_percentage = serializers.DecimalField(max_digits=5, decimal_places=2)
+    
+    # Аналитика
+    stockout_days = serializers.IntegerField()
+    stockout_rate = serializers.DecimalField(max_digits=5, decimal_places=2)
+    inventory_turnover = serializers.DecimalField(max_digits=10, decimal_places=2)
+    days_of_stock = serializers.DecimalField(max_digits=5, decimal_places=1)
+    
+    # Разбивка по операциям
+    operation_breakdown = serializers.ListField(child=serializers.DictField())
+    
+    def __init__(self, *args, **kwargs):
+        # Можно передать данные напрямую
+        data = kwargs.pop('data', {})
+        super().__init__(data=data, **kwargs)
+
+class FinancialSummarySerializer(serializers.ModelSerializer):
+    """
+    ✅ ФИНАНСОВАЯ СВОДКА — дневные показатели
+    """
+    store_name = serializers.CharField(source='store.name', read_only=True)
+    date_formatted = serializers.DateField(source='date', format='%Y-%m-%d', read_only=True)
+    
+    # Проценты для удобства
+    cash_percentage = serializers.SerializerMethodField()
+    card_percentage = serializers.SerializerMethodField()
+    transfer_percentage = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = FinancialSummary
+        fields = [
+            'date', 'date_formatted', 'store', 'store_name',
+            'cash_total', 'transfer_total', 'card_total', 'debt_total',
+            'total_transactions', 'grand_total', 'avg_transaction',
+            'total_margin', 'margin_percentage', 'unique_customers',
+            'repeat_customers', 'customer_retention_rate',
+            'top_cashier_id', 'top_cashier_sales',
+            'cash_percentage', 'card_percentage', 'transfer_percentage'
+        ]
+        read_only_fields = [
+            'date', 'store', 'cash_total', 'transfer_total', 'card_total',
+            'debt_total', 'total_transactions', 'grand_total', 'avg_transaction',
+            'total_margin', 'margin_percentage', 'unique_customers',
+            'repeat_customers', 'customer_retention_rate'
+        ]
+    
+    def get_cash_percentage(self, obj):
+        """✅ Процент наличных"""
+        return float((obj.cash_total / obj.grand_total * 100)) if obj.grand_total > 0 else 0
+    
+    def get_card_percentage(self, obj):
+        """✅ Процент картой"""
+        return float((obj.card_total / obj.grand_total * 100)) if obj.grand_total > 0 else 0
+    
+    def get_transfer_percentage(self, obj):
+        """✅ Процент переводом"""
+        return float((obj.transfer_total / obj.grand_total * 100)) if obj.grand_total > 0 else 0
 
 
 class CustomUnitSerializer(StoreSerializerMixin, serializers.ModelSerializer):
@@ -395,6 +541,7 @@ class ProductSerializer(StoreSerializerMixin, serializers.ModelSerializer):
         required=False
     )
     batch_attributes = serializers.SerializerMethodField()
+    batch_info = serializers.DictField(required=False, write_only=True)
 
     # Единицы измерения
     custom_unit = CustomUnitSerializer(read_only=True)
@@ -424,6 +571,8 @@ class ProductSerializer(StoreSerializerMixin, serializers.ModelSerializer):
     # Метаданные
     created_by = UserSerializer(read_only=True)
 
+
+
     class Meta:
         model = Product
         fields = [
@@ -435,7 +584,7 @@ class ProductSerializer(StoreSerializerMixin, serializers.ModelSerializer):
             'available_sizes', 'available_size_ids', 'sizes_info',
             'attributes', 'created_at', 'created_by',
             'current_stock', 'batches', 'image_label',
-            'is_deleted', 'deleted_at', 'batch_attributes',
+            'is_deleted', 'deleted_at', 'batch_info', 'batch_attributes',
         ]
         read_only_fields = [
             'created_at', 'current_stock', 'created_by', 'unit_display',
@@ -456,9 +605,16 @@ class ProductSerializer(StoreSerializerMixin, serializers.ModelSerializer):
     
     def get_batch_attributes(self, obj):
         """Получить все атрибуты из всех партий товара"""
+        from .models import ProductBatchAttribute
+        
         attributes = []
         for batch in obj.batches.all():
-            for batch_attr in batch.attributes.all():
+            # Правильно получаем ProductBatchAttribute через related_name
+            batch_attributes = ProductBatchAttribute.objects.filter(
+                batch=batch
+            ).select_related('product_attribute__attribute_value__attribute_type')
+            
+            for batch_attr in batch_attributes:
                 attributes.append({
                     'batch_id': batch.id,
                     'attribute_type': batch_attr.product_attribute.attribute_value.attribute_type.name,
@@ -466,6 +622,7 @@ class ProductSerializer(StoreSerializerMixin, serializers.ModelSerializer):
                     'attribute_value_id': batch_attr.product_attribute.attribute_value.id,
                     'quantity': float(batch_attr.quantity)
                 })
+        
         return attributes
 
     def validate_barcode(self, value):
@@ -521,29 +678,198 @@ class ProductSerializer(StoreSerializerMixin, serializers.ModelSerializer):
             )
 
         return attrs
+    
+    def validate_batch_info(self, value):
+        """Валидация batch_info для одиночного создания"""
+        if not value:
+            return value
+        
+        required_fields = ['quantity', 'purchase_price', 'supplier']
+        for field in required_fields:
+            if field not in value:
+                raise serializers.ValidationError(f"Поле '{field}' обязательно для batch_info")
+
+        if value['quantity'] <= 0:
+            raise serializers.ValidationError("Количество должно быть больше нуля")
+        if value['purchase_price'] < 0:
+            raise serializers.ValidationError("Цена закупки должна быть >= 0")
+
+        # ✅ Обработка атрибутов (аналогично мульти-креатору)
+        attributes = value.get('attributes', [])
+        if attributes:
+            # Проверка структуры атрибутов
+            for attr in attributes:
+                if 'attribute_value_id' not in attr or 'quantity' not in attr:
+                    raise serializers.ValidationError(
+                        "Каждый атрибут должен содержать attribute_value_id и quantity"
+                    )
+                if attr['quantity'] <= 0:
+                    raise serializers.ValidationError("Количество атрибута должно быть > 0")
+                
+                if not AttributeValue.objects.filter(id=attr['attribute_value_id']).exists():
+                    raise serializers.ValidationError(
+                        f"Атрибут с ID {attr['attribute_value_id']} не найден"
+                    )
+
+            # Проверка суммы атрибутов
+            total_attr_qty = sum([Decimal(attr['quantity']) for attr in attributes])
+            if total_attr_qty > Decimal(value['quantity']):
+                raise serializers.ValidationError(
+                    "Сумма количеств атрибутов не может превышать quantity партии"
+                )
+
+        # Обработка size_id (если передан)
+        size_id = value.get('size_id')
+        if size_id and not SizeInfo.objects.filter(id=size_id).exists():
+            raise serializers.ValidationError(f"Размер с ID {size_id} не найден")
+
+        return value
 
     def create(self, validated_data):
-        """Создание товара с обработкой размеров"""
-        # Извлекаем размеры
+        """Создание товара с дебагом — поймём, где теряются данные"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # ✅ ШПИОН 1: Что пришло в validated_data?
+        logger.info(f"=== ДЕБАГ СОЗДАНИЯ ТОВАРА ===")
+        logger.info(f"VALIDATED_DATA: {validated_data}")
+        
+        store = self.context.get('request').user.current_store
+        created_by = self.context.get('request').user
+        logger.info(f"STORE: {store.id if store else 'None'}")
+        logger.info(f"CREATED_BY: {created_by.id if created_by else 'None'}")
+        
+        # ✅ ШПИОН 2: Что в batch_info?
+        batch_info = validated_data.pop('batch_info', None)
+        logger.info(f"BATCH_INFO: {batch_info}")
+        
+        if batch_info:
+            logger.info(f"BATCH_INFO SIZE_ID: {batch_info.get('size_id')}")
+            logger.info(f"BATCH_INFO ATTRIBUTES: {batch_info.get('attributes')}")
+        
+        # ✅ ШПИОН 3: Что с размерами?
         default_size = validated_data.pop('default_size', None)
         available_sizes = validated_data.pop('available_sizes', [])
-
-        # Создаем товар
-        product = Product.objects.create(**validated_data)
-
-        # обработка размеров
-        default_size = validated_data.get('default_size')
-        available_sizes = validated_data.get('available_sizes')
-
+        logger.info(f"DEFAULT_SIZE: {default_size}")
+        logger.info(f"AVAILABLE_SIZES: {available_sizes}")
+        
+        # ✅ Создание товара (без дублирования store)
+        product_data = validated_data.copy()
+        if 'store' not in product_data:
+            product_data['store'] = store
+        if 'created_by' not in product_data:
+            product_data['created_by'] = created_by
+        
+        logger.info(f"PRODUCT_DATA: {product_data}")
+        product = Product.objects.create(**product_data)
+        logger.info(f"ПРОДУКТ СОЗДАН: ID={product.id}, has_sizes={product.has_sizes}")
+        
+        # ✅ Обработка размеров
+        has_size_changes = False
         if default_size:
             product.default_size = default_size
+            product.has_sizes = True
+            has_size_changes = True
+            logger.info(f"УСТАНОВЛЕН DEFAULT_SIZE: {default_size.id}")
+        
         if available_sizes:
             product.available_sizes.set(available_sizes)
-
-        product.save()
+            product.has_sizes = True
+            has_size_changes = True
+            logger.info(f"УСТАНОВЛЕНА LIST СНАЙЗОВ: {len(available_sizes)} шт.")
+        
+        if has_size_changes:
+            product.save()
+            logger.info(f"ПРОДУКТ СО СНАЙЗАМИ СОХРАНЁН: has_sizes={product.has_sizes}")
+        
+        # ✅ Stock
+        Stock.objects.get_or_create(
+            product=product, 
+            defaults={'store': store, 'quantity': 0}
+        )
+        logger.info("STOCK СОЗДАН/ОБНОВЛЁН")
+        
+        # ✅ Батч
+        if batch_info:
+            logger.info("=== СОЗДАНИЕ БАТЧА ===")
+            
+            # Определяем размер
+            size_instance = None
+            if 'size_id' in batch_info:
+                try:
+                    size_instance = SizeInfo.objects.get(id=batch_info['size_id'])
+                    logger.info(f"SIZE_INSTANCE НАЙДЕН: {size_instance.id} - {size_instance.size}")
+                except SizeInfo.DoesNotExist:
+                    logger.error(f"SIZE_ID {batch_info['size_id']} НЕ НАЙДЕН!")
+                    raise serializers.ValidationError(f"Размер с ID {batch_info['size_id']} не найден")
+            elif default_size:
+                size_instance = default_size
+                logger.info(f"SIZE_INSTANCE ИЗ DEFAULT: {size_instance.id}")
+            
+            # Создаём батч
+            batch_data = {
+                'product': product,
+                'store': store,
+                'size': size_instance,
+                'quantity': batch_info['quantity'],
+                'purchase_price': batch_info['purchase_price'],
+                'supplier': batch_info['supplier'],
+                'expiration_date': batch_info.get('expiration_date')
+            }
+            logger.info(f"BATCH_DATA: {batch_data}")
+            
+            batch = ProductBatch.objects.create(**batch_data)
+            logger.info(f"БАТЧ СОЗДАН: ID={batch.id}, size={batch.size_id if batch.size else 'None'}")
+            
+            # ✅ Атрибуты
+            attributes = batch_info.get('attributes', [])
+            logger.info(f"АТРИБУТЫ ДЛЯ ОБРАБОТКИ: {len(attributes)} шт.")
+            
+            if attributes:
+                from collections import defaultdict
+                grouped_attributes = defaultdict(int)
+                
+                # Группируем
+                for attr in attributes:
+                    attr_value_id = attr['attribute_value_id']
+                    quantity = attr['quantity']
+                    grouped_attributes[attr_value_id] += quantity
+                    logger.info(f"ГРУППИРУЕМ: attr_id={attr_value_id}, qty={quantity}")
+                
+                # Создаём ProductAttribute и ProductBatchAttribute
+                created_attrs = []
+                for attr_value_id, total_quantity in grouped_attributes.items():
+                    logger.info(f"СОЗДАЁМ АТРИБУТ: {attr_value_id} = {total_quantity}")
+                    
+                    # ProductAttribute
+                    prod_attr, created = ProductAttribute.objects.get_or_create(
+                        product=product,
+                        attribute_value_id=attr_value_id
+                    )
+                    logger.info(f"PRODUCT_ATTRIBUTE: ID={prod_attr.id}, created={created}")
+                    
+                    # ProductBatchAttribute
+                    batch_attr = ProductBatchAttribute.objects.create(
+                        batch=batch,
+                        product_attribute=prod_attr,
+                        quantity=total_quantity,
+                        store=store
+                    )
+                    created_attrs.append(batch_attr.id)
+                    logger.info(f"BATCH_ATTRIBUTE СОЗДАН: ID={batch_attr.id}")
+                
+                logger.info(f"ВСЕГО АТРИБУТОВ СОЗДАНО: {len(created_attrs)}")
+            
+            # Обновляем сток
+            if hasattr(product, 'stock') and hasattr(product.stock, 'update_quantity'):
+                product.stock.update_quantity()
+                logger.info("СТОК ОБНОВЛЁН")
+            else:
+                logger.warning("НЕТ МЕТОДА update_quantity() или нет stock!")
+        
+        logger.info("=== КОНЕЦ СОЗДАНИЯ ===")
         return product
-
-
+    
     def update(self, instance, validated_data):
         """Обновление товара с обработкой размеров"""
         # Извлекаем размеры
