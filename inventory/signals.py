@@ -10,6 +10,12 @@ from django.db.models import Sum, Count, F
 
 logger = logging.getLogger(__name__)
 
+def sanitize(value: str) -> str:
+    """Убирает опасные символы для SQLite"""
+    if not value:
+        return ""
+    return str(value).replace(":", "-")
+
 @receiver(post_save, sender=TransactionItem)
 def track_sales_from_transaction(sender, instance, created, **kwargs):
     """
@@ -18,7 +24,7 @@ def track_sales_from_transaction(sender, instance, created, **kwargs):
     if created and instance.transaction.status == 'completed':
         
         product = instance.product
-        store = instance.store  # Из StoreOwnedModel
+        store = instance.store
         transaction = instance.transaction
         
         # Получаем текущий сток ДО продажи
@@ -39,22 +45,34 @@ def track_sales_from_transaction(sender, instance, created, **kwargs):
                 except SizeInfo.DoesNotExist:
                     logger.warning(f"Размер {size_id} из snapshot не найден")
         
+        # Безопасное форматирование notes без двоеточий
+        cashier_name = transaction.cashier.username if transaction.cashier else "Неизвестно"
+        customer_name = transaction.customer.name if transaction.customer else "Анонимный"
+        payment_method = str(transaction.payment_method)
+        quantity_str = str(float(instance.quantity))
+        
+        safe_notes = sanitize(
+            f'Продажа чека {transaction.id} '
+            f'кассир {cashier_name} '
+            f'клиент {customer_name} '
+            f'метод {payment_method} '
+            f'количество {quantity_str}'
+        )
+        
         # Создаём запись истории стока
         StockHistory.objects.create(
             product=product,
             store=store,
             quantity_before=quantity_before,
             quantity_after=quantity_before - instance.quantity,
-            quantity_change=-instance.quantity,  # Отрицательное для продаж
+            quantity_change=-instance.quantity,
             operation_type='SALE',
             reference_id=f'txn_{transaction.id}_item_{instance.id}',
-            user=transaction.cashier,  # Кассир
+            user=transaction.cashier,
             size=size_instance,
             sale_price_at_time=instance.price,
             purchase_price_at_time=product.price_info['purchase_prices']['average'] if product.price_info else 0,
-            notes=f'Продажа: кассир={transaction.cashier.username if transaction.cashier else "N/A"}, '
-                  f'клиент={transaction.customer.name if transaction.customer else "N/A"}, '
-                  f'метод={transaction.payment_method}, qty={instance.quantity}'
+            notes=safe_notes
         )
         
         # Обновляем текущий сток

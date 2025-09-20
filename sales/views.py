@@ -19,6 +19,7 @@ from customers.views import FlexiblePagination
 from .pagination import OptionalPagination
 import logging
 from stores.mixins import StoreViewSetMixin
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
@@ -193,36 +194,23 @@ class TransactionViewSet(StoreViewSetMixin, viewsets.ModelViewSet):
             403: "Нет доступа к магазину"
         }
     )
+
+
     def create(self, request, *args, **kwargs):
-        # Проверяем наличие магазина
-        current_store = self.get_current_store()
-        if not current_store:
-            logger.error(f"No store found for user {request.user.username} when creating transaction")
-            return Response(
-                {
-                    'error': 'Магазин не определен. Проверьте JWT токен.',
-                    'details': 'Store ID должен быть в JWT токене'
-                },
-                status=status.HTTP_403_FORBIDDEN
-            )
+        # Добавьте отладочную информацию
+        print(f"User: {request.user}")
+        print(f"User attributes: {dir(request.user)}")
+        print(f"Headers: {request.headers}")
+        print(f"Data: {request.data}")
+        
+        # Проверьте JWT токен
+        if hasattr(request, 'auth'):
+            print(f"Auth: {request.auth}")
+        
+        # Вызов оригинального метода
+        return super().create(request, *args, **kwargs)
 
-        logger.info(f"Creating transaction for store: {current_store.name} by user: {request.user.username}")
 
-        # Добавляем контекст с текущим магазином
-        serializer = self.get_serializer(
-            data=request.data,
-            context={
-                'request': request,
-                'store': current_store  # Передаем магазин в контекст
-            }
-        )
-        serializer.is_valid(raise_exception=True)
-
-        # perform_create установит store и cashier
-        self.perform_create(serializer)
-
-        headers = self.get_success_headers(serializer.data)
-        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
     def perform_create(self, serializer):
         """

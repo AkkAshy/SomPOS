@@ -655,3 +655,94 @@ def update_cash_on_sale(sender, instance, **kwargs):
             cash_reg.add_cash(instance.cash_amount, instance.cashier, 'Продажа')
 
 
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+from django.utils import timezone
+from decimal import Decimal
+import logging
+from django.db import transaction
+
+logger = logging.getLogger('analytics')
+
+# ✅ ПРЯМОЙ импорт моделей из того же приложения
+from .models import CashRegister, CashHistory
+
+print("🔄 Loading analytics cash signals...")
+
+@receiver(post_save, sender='sales.Transaction', weak=False)  # ← Используем строку для избежания циклических импортов
+def update_cash_register_on_transaction(sender, instance, created, **kwargs):
+    """
+    ✅ СПЕЦИАЛЬНЫЙ сигнал только для обновления кассы при продажах наличными
+    """
+    print(f"💰 Cash signal triggered: Transaction {instance.id}, created={created}, status={instance.status}")
+    print(f"💰 Cash amount: {instance.cash_amount}, Store: {instance.store.name}")
+    
+    # Обрабатываем только завершенные транзакции с наличными
+    if not (created and instance.status == 'completed' and instance.cash_amount > 0):
+        print(f"💰 Skipping: created={created}, status={instance.status}, cash={instance.cash_amount}")
+        return
+    
+    store = instance.store
+    cash_amount = instance.cash_amount
+    
+    print(f"💰 Processing cash payment: {cash_amount} for store {store.name}")
+    
+    try:
+        with transaction.atomic():  # ← Атомарная операция
+            # Ищем открытую кассу для магазина сегодня
+            today = timezone.now().date()
+            cash_register = CashRegister.objects.filter(
+                store=store,
+                date_opened__date=today,
+                is_open=True
+            ).first()
+            
+            # Если нет открытой кассы - создаём новую
+            if not cash_register:
+                print(f"💰 Creating new cash register for {store.name}")
+                cash_register = CashRegister.objects.create(
+                    store=store,
+                    current_balance=Decimal('0.00'),
+                    target_balance=Decimal('0.00'),
+                    is_open=True,
+                    date_opened=timezone.now()
+                )
+                print(f"💰 Created cash register ID: {cash_register.id}")
+            
+            # Сохраняем баланс до операции
+            balance_before = cash_register.current_balance
+            
+            # Обновляем баланс кассы
+            cash_register.current_balance += cash_amount
+            cash_register.save(update_fields=['current_balance', 'last_updated'])
+            
+            print(f"💰 Cash register updated: {balance_before} → {cash_register.current_balance}")
+            
+            # Создаём запись в истории кассы
+            cash_history = CashHistory.objects.create(
+                cash_register=cash_register,
+                operation_type='ADD_CASH',
+                amount=cash_amount,
+                user=instance.cashier,
+                store=store,
+                notes=f"Продажа #{instance.id}",
+                balance_before=balance_before,
+                balance_after=cash_register.current_balance
+            )
+            
+            print(f"💰 Cash history created ID: {cash_history.id}")
+            
+            logger.info(
+                f"✅ Cash register updated: Transaction {instance.id}, "
+                f"+{cash_amount} сум, balance: {balance_before} → {cash_register.current_balance}"
+            )
+            
+    except Exception as e:
+        logger.error(f"❌ Error updating cash register for transaction {instance.id}: {e}")
+        print(f"❌ Cash register error: {e}")
+        import traceback
+        print(traceback.format_exc())
+
+print("✅ Analytics cash signals loaded")
+
+

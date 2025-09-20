@@ -8,6 +8,8 @@ from decimal import Decimal
 from django.utils import timezone
 
 
+
+
 logger = logging.getLogger('sales')
 
 class Transaction(StoreOwnedModel):
@@ -84,6 +86,7 @@ class Transaction(StoreOwnedModel):
         default='pending'
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    
 
     objects = StoreOwnedManager()
 
@@ -264,6 +267,156 @@ class Transaction(StoreOwnedModel):
                 'full_description': size.full_description
             }
         return None
+    
+    def update_cash_register(self):
+        from analytics.models import CashRegister, CashHistory
+        """
+        ✅ РУЧНОЕ обновление кассы (если сигнал не сработал)
+        """
+        if self.status != 'completed' or self.cash_amount <= 0:
+            logger.warning(f"Транзакция {self.id} не подходит для обновления кассы")
+            return False
+        
+        from django.utils import timezone
+        
+        today = timezone.now().date()
+        cash_register = CashRegister.objects.filter(
+            store=self.store,
+            date_opened__date=today,
+            is_open=True
+        ).first()
+        
+        # Создаём кассу если нет
+        if not cash_register:
+            cash_register = CashRegister.objects.create(
+                store=self.store,
+                current_balance=Decimal('0.00'),
+                target_balance=Decimal('0.00'),
+                is_open=True,
+                date_opened=timezone.now()
+            )
+            logger.info(f"Создана новая касса для транзакции {self.id}")
+        
+        try:
+            # Проверяем, не было ли уже обновления
+            existing_history = CashHistory.objects.filter(
+                cash_register=cash_register,
+                operation_type='ADD_CASH',
+                notes__contains=f"#{self.id}"
+            ).exists()
+            
+            if existing_history:
+                logger.warning(f"Транзакция {self.id} уже обновила кассу")
+                return False
+            
+            # Добавляем в кассу
+            cash_register.add_cash(
+                amount=self.cash_amount,
+                user=self.cashier,
+                notes=f"Ручное добавление по транзакции #{self.id}"
+            )
+            
+            # Создаём запись в истории
+            CashHistory.objects.create(
+                cash_register=cash_register,
+                operation_type='ADD_CASH',
+                amount=self.cash_amount,
+                user=self.cashier,
+                store=self.store,
+                notes=f"Ручное добавление #{self.id}",
+                balance_before=cash_register.current_balance - self.cash_amount,
+                balance_after=cash_register.current_balance
+            )
+            
+            logger.info(f"✅ Касса обновлена вручную: +{self.cash_amount}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка ручного обновления кассы: {e}")
+            return False
+
+    def reverse_cash_register(self):
+        from analytics.models import CashRegister, CashHistory
+        """
+        ✅ ОТМЕНА операции в кассе (при возврате)
+        """
+        if self.cash_amount <= 0:
+            logger.warning(f"Транзакция {self.id} без наличных для отмены")
+            return False
+        
+        from django.utils import timezone
+        
+        today = timezone.now().date()
+        cash_register = CashRegister.objects.filter(
+            store=self.store,
+            date_opened__date=today,
+            is_open=True
+        ).first()
+        
+        if not cash_register:
+            logger.error(f"Нет открытой кассы для отмены транзакции {self.id}")
+            return False
+        
+        try:
+            # Снимаем из кассы
+            cash_register.withdraw(
+                amount=self.cash_amount,
+                user=self.cashier,
+                notes=f"Отмена транзакции #{self.id}"
+            )
+            
+            # Запись в историю
+            CashHistory.objects.create(
+                cash_register=cash_register,
+                operation_type='WITHDRAW',
+                amount=self.cash_amount,
+                user=self.cashier,
+                store=self.store,
+                notes=f"Отмена транзакции #{self.id}",
+                balance_before=cash_register.current_balance + self.cash_amount,
+                balance_after=cash_register.current_balance
+            )
+            
+            logger.info(f"✅ Отмена в кассе: -{self.cash_amount}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка отмены в кассе: {e}")
+            return False
+
+    @property
+    def cash_register_status(self):
+        from analytics.models import CashHistory
+        """
+        ✅ ПРОВЕРКА статуса в кассе
+        """
+        from django.utils import timezone
+        
+        if self.cash_amount <= 0:
+            return {'status': 'no_cash', 'message': 'Транзакция без наличных'}
+        
+        today = timezone.now().date()
+        
+        # Ищем запись в истории кассы
+        cash_history = CashHistory.objects.filter(
+            store=self.store,
+            notes__contains=f"#{self.id}",
+            operation_type='ADD_CASH'
+        ).first()
+        
+        if cash_history:
+            return {
+                'status': 'processed',
+                'message': f'Добавлено в кассу {cash_history.amount} сум',
+                'cash_register_id': cash_history.cash_register.id,
+                'processed_at': cash_history.timestamp
+            }
+        else:
+            return {
+                'status': 'not_processed',
+                'message': 'Не добавлено в кассу',
+                'action': 'Вызовите update_cash_register()'
+            }
 
 class TransactionItem(StoreOwnedModel):
     """

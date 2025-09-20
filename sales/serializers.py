@@ -7,9 +7,9 @@ from django.utils.translation import gettext_lazy as _
 import logging
 import json
 from django.contrib.auth import get_user_model
-from decimal import Decimal
 from django.db import models
-from decimal import ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP
+
 
 User = get_user_model()
 
@@ -92,6 +92,518 @@ class TransactionItemSerializer(serializers.ModelSerializer):
                     pass  # Ошибка обработается в другом месте
 
         return value
+
+
+# class TransactionSerializer(serializers.ModelSerializer):
+#     """
+#     ОБНОВЛЕННЫЙ сериализатор для транзакций с поддержкой гибридной оплаты
+#     """
+#     items = TransactionItemSerializer(many=True)
+#     customer = serializers.PrimaryKeyRelatedField(
+#         queryset=Customer.objects.all(), required=False, allow_null=True
+#     )
+#     new_customer = serializers.DictField(
+#         child=serializers.CharField(), required=False
+#     )
+#     cashier_name = serializers.CharField(source='cashier.username', read_only=True)
+#     customer_name = serializers.CharField(source='customer.full_name', read_only=True)
+#     store_name = serializers.CharField(source='store.name', read_only=True)
+#     items_count = serializers.IntegerField(read_only=True)
+
+#     # ← НОВЫЕ ПОЛЯ для гибридной оплаты
+#     total_amount = serializers.DecimalField(
+#         max_digits=12, 
+#         decimal_places=2,
+#         coerce_to_string=False,  # Не конвертируем в строку
+#         localize=False  # Не используем локализацию
+#     )
+#     cash_amount = serializers.DecimalField(
+#         max_digits=12, 
+#         decimal_places=2, 
+#         required=False, 
+#         default=0,
+#         coerce_to_string=False
+#     )
+#     card_amount = serializers.DecimalField(
+#         max_digits=12, 
+#         decimal_places=2, 
+#         required=False, 
+#         default=0,
+#         coerce_to_string=False
+#     )
+#     transfer_amount = serializers.DecimalField(
+#         max_digits=12, 
+#         decimal_places=2, 
+#         required=False, 
+#         default=0,
+#         coerce_to_string=False
+#     )
+    
+ 
+    
+#     # Дополнительная информация
+#     payment_details = serializers.SerializerMethodField()
+#     items_with_units = serializers.SerializerMethodField()
+#     items_count_display = serializers.SerializerMethodField()
+
+#     class Meta:
+#         model = Transaction
+#         fields = [
+#             'id', 'cashier', 'cashier_name', 'total_amount',
+#             'payment_method', 'status', 'customer', 'customer_name',
+#             'new_customer', 'items', 'created_at', 'store_name',
+#             'cash_amount', 'transfer_amount', 'card_amount',  # ← НОВЫЕ ПОЛЯ
+#             'payment_details', 'items_with_units', 'items_count_display', 
+#             'items_count',
+#         ]
+#         read_only_fields = [
+#             'id', 'cashier', 'cashier_name', 'total_amount', 'created_at', 
+#             'store_name', 'payment_details', 'items_with_units', 'items_count_display'
+#         ]
+
+
+
+#     def get_payment_details(self, obj):
+#         """Возвращает детали оплаты"""
+#         return obj.payment_details
+
+#     def get_items_with_units(self, obj):
+#         """Возвращает информацию о товарах с единицами измерения"""
+#         try:
+#             return obj.get_total_items_with_units()
+#         except:
+#             return []
+        
+#     # sales/serializers.py - ПОЛНЫЙ исправленный TransactionSerializer
+
+
+#     def _round_decimal_field(self, value, field_name):
+#         if value is None:
+#             return Decimal('0.00')
+        
+#         try:
+#             if isinstance(value, (int, float)):
+#                 value = Decimal(str(value))  # ✅ Правильно
+#             elif isinstance(value, str):
+#                 value = Decimal(value)
+            
+#             rounded_value = value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            
+#             return rounded_value
+            
+#         except (ValueError, TypeError) as e:
+#             logger.error(f"Ошибка валидации {field_name}: {value}, error: {e}")
+#             raise serializers.ValidationError(f"Некорректный формат для {field_name}: {value}")
+
+
+#     def get_items_count_display(self, obj):
+#         """Возвращает красивое отображение количества товаров"""
+#         try:
+#             items_count = obj.items_count
+#             if items_count % 1 == 0:
+#                 return f"{int(items_count)} ед."
+#             else:
+#                 return f"{items_count} ед."
+#         except:
+#             return "0 ед."
+        
+#     def validate_total_amount(self, value):
+#         """
+#         ✅ Автоматическое округление total_amount до 2 знаков
+#         """
+#         try:
+#             # Конвертируем в Decimal и округляем
+#             if isinstance(value, (int, float)):
+#                 value = Decimal(str(value))
+#             elif isinstance(value, str):
+#                 value = Decimal(value)
+            
+#             # Округляем до 2 знаков после запятой
+#             rounded_value = value.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            
+#             logger.debug(f"total_amount: {value} → {rounded_value}")
+            
+#             if rounded_value < 0:
+#                 raise serializers.ValidationError("Сумма не может быть отрицательной")
+            
+#             return rounded_value
+            
+#         except (ValueError, TypeError) as e:
+#             logger.error(f"Ошибка валидации total_amount: {value}, error: {e}")
+#             raise serializers.ValidationError(f"Некорректный формат суммы: {value}")
+
+#     def validate_cash_amount(self, value):
+#         """✅ Округление cash_amount"""
+#         return self._round_decimal_field(value, 'cash_amount')
+
+#     def validate_card_amount(self, value):
+#         """✅ Округление card_amount"""
+#         return self._round_decimal_field(value, 'card_amount')
+
+#     def validate_transfer_amount(self, value):
+#         """✅ Округление transfer_amount"""
+#         return self._round_decimal_field(value, 'transfer_amount')
+
+    
+
+#     def validate(self, data):
+#         """
+#         ОБНОВЛЕННАЯ валидация с поддержкой гибридной оплаты
+#         """
+#         items = data.get('items', [])
+#         customer = data.get('customer')
+#         new_customer = data.get('new_customer')
+#         payment_method = data.get('payment_method', 'cash')
+        
+#         # ← НОВЫЕ ПОЛЯ для валидации
+#         cash_amount = data.get('cash_amount', Decimal('0'))
+#         transfer_amount = data.get('transfer_amount', Decimal('0'))
+#         card_amount = data.get('card_amount', Decimal('0'))
+
+#         if not items:
+#             raise serializers.ValidationError({
+#                 "items": _("Должен быть хотя бы один товар")
+#             })
+
+#         if payment_method == 'debt' and not (customer or new_customer):
+#             raise serializers.ValidationError({
+#                 "error": _("Для оплаты в долг требуется customer_id или new_customer")
+#             })
+
+#         # Получаем пользователя для проверки роли
+#         request = self.context.get('request')
+#         user_role = getattr(request.user, 'store_role', 'cashier') if request else 'cashier'
+
+#         # Получаем текущий магазин
+#         current_store = None
+#         if request and hasattr(request.user, 'current_store'):
+#             current_store = request.user.current_store
+
+#         # Рассчитываем сумму с проверкой минимальной цены
+#         total_amount = Decimal('0')
+#         validated_items = []
+#         pricing_errors = []
+        
+#         for item_data in items:
+#             product = item_data['product']
+#             quantity = Decimal(str(item_data['quantity']))
+            
+#             # Получаем цену из запроса или используем цену товара
+#             proposed_price = item_data.get('price')
+#             if proposed_price:
+#                 proposed_price = Decimal(str(proposed_price))
+#             else:
+#                 proposed_price = product.sale_price
+
+#             # Валидация минимальной цены
+#             price_validation = product.validate_sale_price(proposed_price, user_role)
+            
+#             if not price_validation['valid']:
+#                 pricing_errors.append({
+#                     'product': product.name,
+#                     'error': price_validation['error'],
+#                     'proposed_price': float(proposed_price),
+#                     'min_price': price_validation.get('min_price'),
+#                     'min_markup_percent': price_validation.get('min_markup_percent')
+#                 })
+#                 continue
+#             elif 'warning' in price_validation:
+#                 logger.warning(f"Price below markup allowed for admin: {product.name}, price: {proposed_price}")
+
+#             # Проверяем принадлежность к магазину
+#             if current_store and hasattr(product, 'store'):
+#                 if product.store != current_store:
+#                     raise serializers.ValidationError({
+#                         "items": _(f"Товар {product.name} не принадлежит текущему магазину")
+#                     })
+
+#             # Проверяем наличие на складе
+#             if not hasattr(product, 'stock'):
+#                 raise serializers.ValidationError({
+#                     "items": _(f"У товара {product.name} нет информации о складе")
+#                 })
+
+#             quantity_float = float(quantity)
+#             if product.stock.quantity < quantity_float:
+#                 raise serializers.ValidationError({
+#                     "items": _(f"Недостаточно товара {product.name} на складе. "
+#                             f"Доступно: {product.stock.quantity} {product.unit_display}, "
+#                             f"запрошено: {quantity} {product.unit_display}")
+#                 })
+
+#             # Валидируем количество согласно настройкам товара
+#             min_quantity = product.min_sale_quantity
+#             if quantity < min_quantity:
+#                 raise serializers.ValidationError({
+#                     "items": _(f"Количество {quantity} {product.unit_display} товара {product.name} "
+#                             f"меньше минимального: {min_quantity} {product.unit_display}")
+#                 })
+
+#             # Считаем общую сумму с ВАЛИДИРОВАННОЙ ценой
+#             item_total = proposed_price * quantity
+#             total_amount += item_total
+            
+#             validated_items.append({
+#                 'product': product,
+#                 'quantity': quantity,
+#                 'price': proposed_price,
+#                 'subtotal': item_total
+#             })
+
+#         # Проверяем ошибки ценообразования
+#         if pricing_errors:
+#             raise serializers.ValidationError({
+#                 "pricing_errors": pricing_errors,
+#                 "message": "Некоторые товары имеют цену ниже минимальной наценки"
+#             })
+
+#         # ← НОВАЯ ВАЛИДАЦИЯ для гибридной оплаты
+#         if payment_method == 'hybrid':
+#             hybrid_total = cash_amount + transfer_amount + card_amount
+            
+#             # Проверяем что сумма гибридной оплаты равна общей сумме (с допуском на погрешность)
+#             if abs(hybrid_total - total_amount) > Decimal('0.01'):
+#                 raise serializers.ValidationError({
+#                     "hybrid_payment_error": f"Сумма гибридной оплаты ({hybrid_total}) не равна общей сумме товаров ({total_amount})",
+#                     "details": {
+#                         "calculated_total": float(total_amount),
+#                         "hybrid_total": float(hybrid_total),
+#                         "cash_amount": float(cash_amount),
+#                         "transfer_amount": float(transfer_amount),
+#                         "card_amount": float(card_amount)
+#                     }
+#                 })
+            
+#             # Проверяем что указан хотя бы один способ оплаты
+#             if hybrid_total == 0:
+#                 raise serializers.ValidationError({
+#                     "hybrid_payment_error": "Для гибридной оплаты должен быть указан хотя бы один способ с суммой больше нуля"
+#                 })
+                
+#             # Проверяем что все суммы неотрицательные
+#             if cash_amount < 0 or transfer_amount < 0 or card_amount < 0:
+#                 raise serializers.ValidationError({
+#                     "hybrid_payment_error": "Все суммы в гибридной оплате должны быть неотрицательными"
+#                 })
+                
+#         else:
+#             # Для обычных методов оплаты игнорируем гибридные поля
+#             data['cash_amount'] = Decimal('0')
+#             data['transfer_amount'] = Decimal('0')
+#             data['card_amount'] = Decimal('0')
+#         total_amount = total_amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+#         for item in validated_items:
+#             item['subtotal'] = item['subtotal'].quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+#             item['price'] = item['price'].quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+#         data['total_amount'] = total_amount
+#         data['validated_items'] = validated_items
+        
+#         logger.info(f"Total amount calculated: {total_amount}, payment_method: {payment_method}")
+#         if payment_method == 'hybrid':
+#             logger.info(f"Hybrid payment: cash={cash_amount}, transfer={transfer_amount}, card={card_amount}")
+        
+            
+#         return data
+
+#     def create(self, validated_data):
+#         """
+#         ✅ ИСПРАВЛЕННОЕ создание транзакции с правильными полями оплаты
+#         """
+#         items_data = validated_data.pop('items', [])
+#         validated_items = validated_data.pop('validated_items', [])
+#         customer = validated_data.pop('customer', None)
+#         new_customer = validated_data.pop('new_customer', None)
+
+#         # Убираем 'cashier' из validated_data
+#         validated_data.pop('cashier', None)
+
+#         # Получаем пользователя и магазин
+#         request = self.context['request']
+#         user = request.user
+
+#         # Проверяем магазин
+#         if 'store' not in validated_data:
+#             if hasattr(user, 'current_store') and user.current_store:
+#                 validated_data['store'] = user.current_store
+#             else:
+#                 raise serializers.ValidationError({
+#                     "error": "Не удалось определить текущий магазин"
+#                 })
+
+#         # Обрабатываем нового покупателя
+#         if new_customer:
+#             phone = new_customer['phone']
+#             customer, created = Customer.objects.get_or_create(
+#                 phone=phone,
+#                 store=validated_data['store'],
+#                 defaults={'full_name': new_customer['full_name']}
+#             )
+#             if created:
+#                 logger.info(f"Created new customer: {customer.full_name}")
+
+#         # ✅ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Правильно устанавливаем поля оплаты
+#         payment_method = validated_data.get('payment_method')
+#         total_amount = validated_data.get('total_amount', Decimal('0.00'))
+        
+#         # Получаем поля оплаты или устанавливаем по умолчанию
+#         cash_amount = validated_data.get('cash_amount', Decimal('0.00'))
+#         card_amount = validated_data.get('card_amount', Decimal('0.00'))
+#         transfer_amount = validated_data.get('transfer_amount', Decimal('0.00'))
+        
+#         logger.info(f"Payment method: {payment_method}, total: {total_amount}")
+#         logger.info(f"Payment amounts before fix: cash={cash_amount}, card={card_amount}, transfer={transfer_amount}")
+        
+#         # ✅ АВТОМАТИЧЕСКОЕ заполнение полей оплаты если они нулевые
+#         if payment_method in ['cash', 'card', 'transfer']:
+#             # Если все поля оплаты нулевые, заполняем нужное поле
+#             if cash_amount == 0 and card_amount == 0 and transfer_amount == 0:
+#                 if payment_method == 'cash':
+#                     validated_data['cash_amount'] = total_amount
+#                     logger.info(f"✅ Auto-set cash_amount: {total_amount}")
+#                 elif payment_method == 'card':
+#                     validated_data['card_amount'] = total_amount
+#                     logger.info(f"✅ Auto-set card_amount: {total_amount}")
+#                 elif payment_method == 'transfer':
+#                     validated_data['transfer_amount'] = total_amount
+#                     logger.info(f"✅ Auto-set transfer_amount: {total_amount}")
+#             else:
+#                 # Поля уже заполнены, используем их
+#                 logger.info(f"✅ Using provided payment amounts")
+        
+#         elif payment_method == 'hybrid':
+#             # Для гибридной оплаты проверяем соответствие
+#             actual_total = cash_amount + card_amount + transfer_amount
+#             if abs(actual_total - total_amount) > Decimal('0.01'):
+#                 raise serializers.ValidationError({
+#                     "error": f"Сумма частичных платежей ({actual_total}) не равна общей сумме ({total_amount})"
+#                 })
+#             # Поля уже корректные, ничего не меняем
+#             logger.info(f"✅ Hybrid payment validated")
+        
+#         # Логируем финальные значения
+#         final_cash = validated_data.get('cash_amount', Decimal('0.00'))
+#         final_card = validated_data.get('card_amount', Decimal('0.00'))
+#         final_transfer = validated_data.get('transfer_amount', Decimal('0.00'))
+#         logger.info(f"Final payment amounts: cash={final_cash}, card={final_card}, transfer={final_transfer}")
+
+#         # Создаем транзакцию
+#         transaction = Transaction.objects.create(
+#             cashier=user,
+#             customer=customer,
+#             **validated_data  # ✅ Теперь включает правильные поля оплаты
+#         )
+        
+#         payment_info = "гибридная" if transaction.payment_method == 'hybrid' else transaction.get_payment_method_display()
+#         logger.info(f"Transaction #{transaction.id} created: method={payment_info}, cash_amount={transaction.cash_amount}")
+
+#         # Создаем элементы транзакции
+#         for item_data in validated_items:
+#             product = item_data['product']
+#             quantity = item_data['quantity']
+#             price_from_db = item_data['price']
+
+#             # Дополнительная проверка
+#             if price_from_db <= 0:
+#                 logger.error(f"Invalid price in DB for product {product.name}: {price_from_db}")
+#                 raise serializers.ValidationError({
+#                     "error": f"Некорректная цена товара {product.name} в базе данных"
+#                 })
+
+#             transaction_item = TransactionItem.objects.create(
+#                 transaction=transaction,
+#                 product=product,
+#                 quantity=quantity,
+#                 price=price_from_db,
+#                 store=transaction.store
+#             )
+            
+#             logger.info(
+#                 f"Transaction item created: {product.name} x{quantity} {product.unit_display} "
+#                 f"@ {price_from_db}"
+#             )
+
+#         # Обрабатываем продажу
+#         try:
+#             transaction.process_sale()
+#             logger.info(f"Transaction #{transaction.id} processed. Total: {transaction.total_amount}, Cash: {transaction.cash_amount}")
+            
+#             # ✅ ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: Логируем что должно попасть в кассу
+#             if transaction.cash_amount > 0:
+#                 logger.info(f"💰 This transaction should update cash register with {transaction.cash_amount}")
+#             else:
+#                 logger.warning(f"💳 No cash amount in transaction {transaction.id} - cash register won't be updated")
+                
+#         except Exception as e:
+#             logger.error(f"Error processing transaction #{transaction.id}: {str(e)}")
+#             transaction.status = 'failed'
+#             transaction.save()
+#             raise serializers.ValidationError({
+#                 "error": f"Ошибка обработки продажи: {str(e)}"
+#             })
+
+#         return transaction
+
+#     def to_representation(self, instance):
+#         """
+#         ОБНОВЛЕННОЕ представление с информацией о гибридной оплате
+#         """
+#         data = super().to_representation(instance)
+
+#         # Добавляем информацию о магазине
+#         if instance.store:
+#             data['store'] = {
+#                 'id': str(instance.store.id),
+#                 'name': instance.store.name
+#             }
+
+#         # Добавляем детали товаров с единицами измерения
+#         items_detail = []
+#         for item in instance.items.all():
+#             item_detail = {
+#                 'product_id': item.product.id,
+#                 'product_name': item.product.name,
+#                 'quantity': str(item.quantity),
+#                 'quantity_display': f"{item.quantity} {item.unit_display}",
+#                 'unit_display': item.unit_display,
+#                 'unit_type': item.unit_type,
+#                 'price': str(item.price),
+#                 'subtotal': str(item.subtotal),
+#                 'is_fractional': item.quantity % 1 != 0
+#             }
+            
+#             # Добавляем информацию о размере если есть
+#             if item.size_snapshot:
+#                 item_detail['size_info'] = item.size_snapshot
+            
+#             items_detail.append(item_detail)
+            
+#         data['items_detail'] = items_detail
+
+#         # Добавляем сводную информацию о единицах измерения
+#         units_summary = {}
+#         for item in instance.items.all():
+#             unit_key = item.unit_display or 'шт'
+#             if unit_key not in units_summary:
+#                 units_summary[unit_key] = {
+#                     'total_quantity': Decimal('0'),
+#                     'total_amount': Decimal('0'),
+#                     'items_count': 0
+#                 }
+            
+#             units_summary[unit_key]['total_quantity'] += item.quantity
+#             units_summary[unit_key]['total_amount'] += item.subtotal
+#             units_summary[unit_key]['items_count'] += 1
+
+#         # Конвертируем в сериализуемый формат
+#         for unit_key in units_summary:
+#             units_summary[unit_key]['total_quantity'] = str(units_summary[unit_key]['total_quantity'])
+#             units_summary[unit_key]['total_amount'] = str(units_summary[unit_key]['total_amount'])
+
+#         data['units_summary'] = units_summary
+
+#         return data
 
 
 class TransactionSerializer(serializers.ModelSerializer):
@@ -335,18 +847,12 @@ class TransactionSerializer(serializers.ModelSerializer):
         return data
 
     def create(self, validated_data):
-        """
-        ОБНОВЛЕННОЕ создание транзакции с гибридной оплатой
-        """
         items_data = validated_data.pop('items')
         validated_items = validated_data.pop('validated_items', [])
         customer = validated_data.pop('customer', None)
         new_customer = validated_data.pop('new_customer', None)
-
-        # Убираем 'cashier' из validated_data
         validated_data.pop('cashier', None)
 
-        # Получаем пользователя и магазин
         request = self.context['request']
         user = request.user
 
@@ -358,6 +864,32 @@ class TransactionSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     "error": "Не удалось определить текущий магазин"
                 })
+
+        # ДОБАВЬТЕ ЭТУ ЛОГИКУ - устанавливаем поля оплаты
+        payment_method = validated_data.get('payment_method')
+        total_amount = validated_data.get('total_amount', Decimal('0'))
+        
+        # Устанавливаем правильные значения для полей оплаты
+        if payment_method == 'cash':
+            validated_data['cash_amount'] = total_amount
+            validated_data['card_amount'] = Decimal('0')
+            validated_data['transfer_amount'] = Decimal('0')
+        elif payment_method == 'card':
+            validated_data['cash_amount'] = Decimal('0')
+            validated_data['card_amount'] = total_amount
+            validated_data['transfer_amount'] = Decimal('0')
+        elif payment_method == 'transfer':
+            validated_data['cash_amount'] = Decimal('0')
+            validated_data['card_amount'] = Decimal('0')
+            validated_data['transfer_amount'] = total_amount
+        elif payment_method == 'hybrid':
+            # Для гибридной оплаты значения уже должны быть установлены в validate()
+            pass
+        else:
+            # По умолчанию обнуляем все поля
+            validated_data['cash_amount'] = Decimal('0')
+            validated_data['card_amount'] = Decimal('0')
+            validated_data['transfer_amount'] = Decimal('0')
 
         # Обрабатываем нового покупателя
         if new_customer:

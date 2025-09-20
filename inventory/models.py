@@ -168,6 +168,11 @@ class StockHistory(models.Model):
         if self.pk is None:  # Новый объект
             self.quantity_change = self.quantity_after - self.quantity_before
         super().save(*args, **kwargs)
+        if self.notes:
+            self.notes = self.notes.replace(":", "-")
+        super().save(*args, **kwargs)
+
+
     
     @classmethod
     def get_daily_summary(cls, product, date):
