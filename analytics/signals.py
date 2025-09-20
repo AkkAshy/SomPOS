@@ -8,7 +8,8 @@ from django.utils import timezone
 from sales.models import Transaction
 from analytics.models import (
     SalesSummary, ProductAnalytics, CustomerAnalytics,
-    UnitAnalytics, SizeAnalytics, CategoryAnalytics
+    UnitAnalytics, SizeAnalytics, CategoryAnalytics,
+    CashRegister
 )
 import logging
 from decimal import Decimal
@@ -323,7 +324,11 @@ def _process_unit_analytics(instance):
             if not created:
                 analytics.total_quantity_sold += unit_data['quantity']
                 analytics.total_revenue += unit_data['revenue']
-                analytics.products_count = len(set(list(analytics.products_count) + list(unit_data['products'])))
+                
+                # Обновляем product_ids
+                analytics.product_ids = list(set(analytics.product_ids + list(unit_data['products'])))
+                analytics.products_count = len(analytics.product_ids)
+                
                 analytics.transactions_count += 1
                 analytics.save()
 
@@ -639,3 +644,14 @@ def _is_transaction_already_included_in_customer_analytics(instance, analytics):
     except Exception as e:
         logger.error(f"Error checking customer transaction inclusion: {str(e)}")
         return False
+    
+
+# Интеграция с продажами: в signals.py добавь
+@receiver(post_save, sender=Transaction)
+def update_cash_on_sale(sender, instance, **kwargs):
+    if instance.payment_method == 'cash' and instance.cash_amount > 0:
+        cash_reg = CashRegister.objects.filter(store=instance.store, is_open=True).first()
+        if cash_reg:
+            cash_reg.add_cash(instance.cash_amount, instance.cashier, 'Продажа')
+
+

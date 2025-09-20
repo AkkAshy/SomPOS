@@ -7,6 +7,10 @@ from customers.models import Customer
 import logging
 from django.contrib.auth.models import User
 from stores.mixins import StoreOwnedModel, StoreOwnedManager
+from django.db import transaction  # Для атомарных операций
+from django.utils import timezone
+from decimal import Decimal
+from inventory.models import FinancialSummary
 
 
 logger = logging.getLogger('analytics')
@@ -195,6 +199,10 @@ class CustomerAnalytics(models.Model):
         return f"{self.customer.full_name} - {self.date} ({self.total_purchases})"
 
 
+def default_product_ids():
+    """Возвращает пустой список для поля product_ids"""
+    return []
+from django.contrib.postgres.fields import ArrayField
 class UnitAnalytics(StoreOwnedModel):
     """
     НОВАЯ модель: Аналитика по единицам измерения
@@ -226,10 +234,14 @@ class UnitAnalytics(StoreOwnedModel):
         default=0,
         verbose_name="Общая выручка"
     )
-    products_count = models.PositiveIntegerField(
-        default=0,
-        verbose_name="Количество товаров с этой единицей"
+    product_ids = models.JSONField(
+        default=default_product_ids,  # Функция вместо list
+        verbose_name="ID товаров"
     )
+
+
+    products_count = models.PositiveIntegerField(default=0, verbose_name="Количество уникальных товаров")
+
     transactions_count = models.PositiveIntegerField(
         default=0,
         verbose_name="Количество транзакций"
@@ -260,6 +272,186 @@ class UnitAnalytics(StoreOwnedModel):
         if self.total_quantity_sold and self.total_quantity_sold > 0:
             self.average_unit_price = self.total_revenue / self.total_quantity_sold
 
+
+class CashRegister(StoreOwnedModel):
+    """
+    ✅ МОДЕЛЬ КАССЫ — сколько денег в ящике прямо сейчас
+    Баланс обновляется при продажах (cash payments) и снятиях.
+    Связь с FinancialSummary для дневных итогов.
+    """
+    date_opened = models.DateTimeField(default=timezone.now, verbose_name="Открытие смены")
+    current_balance = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal('0.00'),
+        verbose_name="Текущий баланс"
+    )
+    target_balance = models.DecimalField(  # Целевой баланс на конец смены
+        max_digits=12, decimal_places=2, default=Decimal('0.00'),
+        verbose_name="Целевой баланс"
+    )
+    last_updated = models.DateTimeField(auto_now=True, verbose_name="Последнее обновление")
+    is_open = models.BooleanField(default=True, verbose_name="Смена открыта")
+    
+    # Связь с дневным summary (опционально, для агрегации)
+    financial_summary = models.ForeignKey(
+        FinancialSummary, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='cash_registers', verbose_name="Дневная сводка"
+    )
+
+    closed_balance = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal('0.00'),
+        verbose_name="Баланс при закрытии",
+        help_text="Фактический баланс при закрытии смены"
+    )
+    closed_at = models.DateTimeField(null=True, blank=True, verbose_name="Время закрытия")
+    discrepancy = models.DecimalField(  # Расхождение: actual - target
+        max_digits=12, decimal_places=2, default=Decimal('0.00'),
+        verbose_name="Расхождение"
+    )
+    
+    # Связь с историей операций кассы (создадим ниже)
+    cash_history = models.ManyToManyField(
+        'CashHistory', related_name='cash_registers', blank=True
+    )
+
+    objects = StoreOwnedManager()
+
+    class Meta:
+        verbose_name = "Касса"
+        verbose_name_plural = "Кассы"
+        unique_together = ('store', 'date_opened')  # Одна касса на смену в магазине
+        ordering = ['-date_opened']
+
+    def __str__(self):
+        return f"Касса {self.store.name} ({self.date_opened.date()}) — {self.current_balance:,} сум"
+
+    def add_cash(self, amount, user=None, notes=""):
+        """✅ Добавление денег (от продаж или внесения)"""
+        amount = Decimal(str(amount))
+        if amount <= 0:
+            raise ValueError("Сумма должна быть положительной")
+        
+        with transaction.atomic():
+            self.current_balance += amount
+            self.save(update_fields=['current_balance', 'last_updated'])
+            # Логируем в историю (создай отдельную модель CashHistory, если нужно)
+            logger.info(f"Добавлено {amount} в кассу {self.id} пользователем {user} ({notes})")
+            # Обновляем summary, если связано
+            if self.financial_summary:
+                self.financial_summary.cash_total += amount
+                self.financial_summary.save()
+
+    def withdraw(self, amount, user, notes="Выдача наличных"):
+        """✅ Снятие денег — твоя 'кнопка забрать'"""
+        amount = Decimal(str(amount))
+        if amount <= 0:
+            raise ValueError("Сумма должна быть положительной")
+        if amount > self.current_balance:
+            raise ValueError(f"Недостаточно на кассе. Доступно: {self.current_balance}")
+        if not self.is_open:
+            raise ValueError("Смена закрыта — нельзя снимать")
+
+        with transaction.atomic():
+            self.current_balance -= amount
+            self.save(update_fields=['current_balance', 'last_updated'])
+            # Логируем (расширь, если нужно историю)
+            logger.info(f"Снято {amount} из кассы {self.id} пользователем {user} ({notes})")
+            # Обновляем summary (снимаем из cash_total? Зависит от логики — может, отдельно)
+            if self.financial_summary:
+                # Здесь логика: если снятие — это расход, то минус от grand_total или отдельное поле
+                self.financial_summary.cash_total -= amount  # Пример; адаптируй
+                self.financial_summary.save()
+        
+        return amount  # Возвращаем, сколько сняли
+
+    def close_shift(self, actual_balance, user=None, notes="Закрытие смены"):
+        """✅ ЗАКРЫТИЕ СМЕНЫ — ритуал конца дня"""
+        actual_balance = Decimal(str(actual_balance))
+        
+        if self.is_open == False:
+            raise ValueError("Смена уже закрыта")
+        
+        with transaction.atomic():
+            # Закрываем смену
+            self.is_open = False
+            self.closed_balance = actual_balance
+            self.closed_at = timezone.now()
+            self.discrepancy = actual_balance - self.target_balance
+            self.save(update_fields=['is_open', 'closed_balance', 'closed_at', 'discrepancy'])
+            
+            # Логируем закрытие
+            logger.info(f"Смена {self.id} закрыта. Фактический: {actual_balance}, Целевой: {self.target_balance}, Расхождение: {self.discrepancy} (пользователь: {user})")
+            
+            # Создаём запись в истории
+            CashHistory.objects.create(
+                cash_register=self,
+                operation_type='CLOSE_SHIFT',
+                amount=actual_balance,
+                user=user,
+                notes=f"{notes}. Расхождение: {self.discrepancy}"
+            )
+            
+            # Финализируем дневную сводку
+            if self.financial_summary:
+                self.financial_summary.grand_total = actual_balance  # Или другая логика
+                self.financial_summary.save()
+            else:
+                # Создаём summary, если нет
+                self.financial_summary = FinancialSummary.objects.create(
+                    store=self.store,
+                    date=self.date_opened.date(),
+                    cash_total=actual_balance,
+                    grand_total=actual_balance
+                )
+        
+        return {
+            'discrepancy': self.discrepancy,
+            'status': 'closed',
+            'message': f"Смена закрыта. Расхождение: {self.discrepancy:,.0f} сум"
+        }
+
+
+class CashHistory(StoreOwnedModel):
+    """
+    ✅ ИСТОРИЯ ОПЕРАЦИЙ КАССЫ — аудит наличных
+    """
+    CASH_OPERATIONS = [
+        ('OPEN_SHIFT', 'Открытие смены'),
+        ('ADD_CASH', 'Добавление наличных'),
+        ('WITHDRAW', 'Снятие наличных'),
+        ('CLOSE_SHIFT', 'Закрытие смены'),
+        ('CORRECTION', 'Корректировка'),
+    ]
+    
+    cash_register = models.ForeignKey(
+        CashRegister, on_delete=models.CASCADE, related_name='history'
+    )
+    operation_type = models.CharField(max_length=20, choices=CASH_OPERATIONS)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    user = models.ForeignKey(
+        'auth.User', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='cash_operations'
+    )
+    timestamp = models.DateTimeField(default=timezone.now, db_index=True)
+    notes = models.TextField(blank=True)
+    balance_before = models.DecimalField(max_digits=12, decimal_places=2, null=True)
+    balance_after = models.DecimalField(max_digits=12, decimal_places=2, null=True)
+
+    class Meta:
+        verbose_name = "Операция кассы"
+        verbose_name_plural = "История кассы"
+        ordering = ['-timestamp']
+        indexes = [models.Index(fields=['cash_register', 'timestamp'])]
+
+    def __str__(self):
+        return f"{self.get_operation_type_display()} | {self.amount:,.0f} | {self.timestamp.strftime('%H:%M')}"
+
+    def save(self, *args, **kwargs):
+        """Автоматически фиксируем баланс до/после"""
+        if self.pk is None:  # Новый объект
+            self.balance_before = self.cash_register.current_balance
+        super().save(*args, **kwargs)
+        self.balance_after = self.cash_register.current_balance
+        super().save(update_fields=['balance_after'])
 
 class SizeAnalytics(StoreOwnedModel):
     """

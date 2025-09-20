@@ -6,8 +6,8 @@ from rest_framework.filters import OrderingFilter
 from django.utils import timezone
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
-from .models import SalesSummary, ProductAnalytics, CustomerAnalytics, SupplierAnalytics
-from .serializers import SalesSummarySerializer, ProductAnalyticsSerializer, CustomerAnalyticsSerializer, SupplierAnalyticsSerializer
+from .models import SalesSummary, ProductAnalytics, CustomerAnalytics, SupplierAnalytics, CashRegister
+from .serializers import SalesSummarySerializer, ProductAnalyticsSerializer, CustomerAnalyticsSerializer, SupplierAnalyticsSerializer, CashRegisterSerializer, CashHistorySerializer, CashRegisterCloseSerializer
 from django.utils.translation import gettext_lazy as _
 from django.db.models import Sum, Count, F, Avg, Q
 from datetime import datetime, timedelta
@@ -31,6 +31,107 @@ logger = logging.getLogger(__name__)
 class AnalyticsPermission(permissions.BasePermission):
     def has_permission(self, request, view):
         return request.user.groups.filter(name__in=['admin', 'manager', 'owner']).exists()
+
+
+class CashRegisterViewSet(StoreViewSetMixin, viewsets.ModelViewSet):
+    """
+    ✅ VIEWSET КАССЫ — просмотр баланса и снятие
+    """
+    queryset = CashRegister.objects.filter(is_open=True)  # Только открытые смены
+    serializer_class = CashRegisterSerializer
+    permission_classes = [AnalyticsPermission]
+    
+    def get_queryset(self):
+        store = self.get_current_store()
+        return super().get_queryset().filter(store=store)
+
+    def retrieve(self, request, *args, **kwargs):
+        """GET: текущий баланс кассы"""
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return Response({
+            'current_balance': serializer.data['current_balance'],
+            'formatted': serializer.data['balance_formatted'],
+            'is_open': instance.is_open,
+            'message': f"На кассе {serializer.data['balance_formatted']}. Смена открыта."
+        })
+
+    @action(detail=True, methods=['post'])
+    def withdraw(self, request, pk=None):
+        """POST: кнопка 'забери' — снимаем сумму"""
+        instance = self.get_object()
+        amount = request.data.get('amount')
+        notes = request.data.get('notes', 'Выдача наличных')
+        
+        if not amount:
+            return Response({'error': 'Укажите сумму'}, status=400)
+        
+        try:
+            withdrawn = instance.withdraw(amount, request.user, notes)
+            return Response({
+                'success': True,
+                'withdrawn': float(withdrawn),
+                'new_balance': float(instance.current_balance),
+                'message': f"Снято {withdrawn:,.0f} сум. Остаток: {instance.current_balance:,.0f} сум."
+            })
+        except ValueError as e:
+            return Response({'error': str(e)}, status=400)
+
+    @action(detail=False, methods=['post'])
+    def open_shift(self, request):
+        """POST: открыть новую смену (если нужно)"""
+        store = self.get_current_store()
+        # Создаём, если нет открытой
+        if CashRegister.objects.filter(store=store, is_open=True).exists():
+            return Response({'error': 'Смена уже открыта'}, status=400)
+        
+        target = request.data.get('target_balance', Decimal('0.00'))
+        instance = CashRegister.objects.create(store=store, target_balance=target)
+        return Response({'id': instance.id, 'message': 'Смена открыта. Баланс: 0 сум'})
+    
+    @action(detail=True, methods=['post'])
+    def close_shift(self, request, pk=None):
+        """POST: закрыть смену — ритуал конца дня"""
+        instance = self.get_object()
+        
+        if not instance.is_open:
+            return Response({'error': 'Смена уже закрыта'}, status=400)
+        
+        serializer = CashRegisterCloseSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=400)
+        
+        actual_balance = serializer.validated_data['actual_balance']
+        notes = serializer.validated_data['notes']
+        
+        try:
+            result = instance.close_shift(actual_balance, request.user, notes)
+            
+            # Возвращаем обновлённые данные
+            updated_serializer = self.get_serializer(instance)
+            return Response({
+                'success': True,
+                'status': result['status'],
+                'discrepancy': float(result['discrepancy']),
+                'message': result['message'],
+                'final_balance': float(instance.closed_balance),
+                'closed_at': instance.closed_at.isoformat() if instance.closed_at else None,
+                'cash_register': updated_serializer.data
+            })
+        except ValueError as e:
+            return Response({'error': str(e)}, status=400)
+
+    @action(detail=True, methods=['get'])
+    def history(self, request, pk=None):
+        """GET: история операций по кассе"""
+        instance = self.get_object()
+        history = instance.history.select_related('user').order_by('-timestamp')[:50]  # Последние 50
+        serializer = CashHistorySerializer(history, many=True)
+        return Response({
+            'cash_register': instance.id,
+            'total_operations': history.count(),
+            'history': serializer.data
+        })
 
 class SupplierAnalyticsViewSet(StoreViewSetMixin, viewsets.ReadOnlyModelViewSet):
     """

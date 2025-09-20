@@ -7,6 +7,7 @@ from stores.mixins import StoreOwnedModel, StoreOwnedManager
 from decimal import Decimal
 from django.utils import timezone
 
+
 logger = logging.getLogger('sales')
 
 class Transaction(StoreOwnedModel):
@@ -24,6 +25,18 @@ class Transaction(StoreOwnedModel):
         null=True,
         related_name='sales_transactions'
     )
+    cash_register = models.ForeignKey(
+        'analytics.CashRegister',  # ← Строка вместо импорта!
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='transactions',
+        verbose_name="Касса (смена)",
+        help_text="Касса, через которую прошла продажа (если наличные)"
+    )
+    
+    cash_register_time = models.DateTimeField(null=True, blank=True, verbose_name="Время операции на кассе")
+
     customer = models.ForeignKey(
         'customers.Customer',
         on_delete=models.SET_NULL,
@@ -83,7 +96,7 @@ class Transaction(StoreOwnedModel):
         ]
 
     def __str__(self):
-        return f"Продажа #{self.id} от {self.created_at}"
+        return f"Транзакция #{self.id} | {self.total_amount} сум | Касса: {self.cash_register.id if self.cash_register else 'N/A'}"
 
     @property
     def items_count(self):

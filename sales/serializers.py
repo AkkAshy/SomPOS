@@ -9,6 +9,7 @@ import json
 from django.contrib.auth import get_user_model
 from decimal import Decimal
 from django.db import models
+from decimal import ROUND_HALF_UP
 
 User = get_user_model()
 
@@ -317,6 +318,11 @@ class TransactionSerializer(serializers.ModelSerializer):
             data['cash_amount'] = Decimal('0')
             data['transfer_amount'] = Decimal('0')
             data['card_amount'] = Decimal('0')
+        total_amount = total_amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+
+        for item in validated_items:
+            item['subtotal'] = item['subtotal'].quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            item['price'] = item['price'].quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
         data['total_amount'] = total_amount
         data['validated_items'] = validated_items
@@ -324,6 +330,7 @@ class TransactionSerializer(serializers.ModelSerializer):
         logger.info(f"Total amount calculated: {total_amount}, payment_method: {payment_method}")
         if payment_method == 'hybrid':
             logger.info(f"Hybrid payment: cash={cash_amount}, transfer={transfer_amount}, card={card_amount}")
+        
             
         return data
 

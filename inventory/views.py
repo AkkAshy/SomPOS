@@ -674,7 +674,15 @@ class ProductViewSet(
     ordering_fields = ['name', 'sale_price', 'created_at']
     ordering = ['-created_at']
 
-    queryset = Product.objects.select_related("category", "stock").prefetch_related("size", "batches")
+    queryset = Product.objects.select_related(
+        "category", 
+        "stock", 
+        "default_size",
+        "custom_unit"
+    ).prefetch_related(
+        "available_sizes", 
+        "batches"
+    )
 
     @action(detail=False, methods=['post'])
     def create_multi_size(self, request):
@@ -1360,7 +1368,7 @@ class ProductViewSet(
         products = Product.objects.filter(
             store=current_store,
             name__icontains=product_name
-        ).select_related('size', 'stock', 'category').order_by('name', 'size__size')
+        ).select_related('default_size', 'stock', 'category').order_by('name', 'default_size__size')
 
         # Если товары не найдены
         if not products.exists():
@@ -1390,15 +1398,15 @@ class ProductViewSet(
                 'category': product.category.name if product.category else None
             }
 
-            if product.size:
-                size_key = product.size.size
+            if product.default_size:  
+                size_key = product.default_size.size  
                 if size_key not in sizes_data:
                     sizes_data[size_key] = {
-                        'size': product.size.size,
-                        'size_id': product.size.id,
-                        'chest': product.size.chest,
-                        'waist': product.size.waist,
-                        'length': product.size.length,
+                        'size': product.default_size.size,  # ✅
+                        'size_id': product.default_size.id,  # ✅
+                        'chest': product.default_size.chest,
+                        'waist': product.default_size.waist,
+                        'length': product.default_size.length,
                         'count': 0,
                         'stock_quantity': 0,
                         'products': []
