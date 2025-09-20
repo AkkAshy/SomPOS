@@ -1,11 +1,26 @@
 # analytics/serializers.py
 from rest_framework import serializers
-from .models import SalesSummary, ProductAnalytics, CustomerAnalytics
+from .models import SalesSummary, ProductAnalytics, CustomerAnalytics, SupplierAnalytics
 from inventory.serializers import ProductSerializer
 from customers.models import Customer
 from django.utils.translation import gettext_lazy as _
 
 from sales.models import Transaction, TransactionHistory
+
+
+class SupplierAnalyticsSerializer(serializers.ModelSerializer):
+    supplier_display = serializers.CharField(source='supplier', read_only=True)  # Для удобства
+
+    class Meta:
+
+        model = SupplierAnalytics
+        fields = [
+            'date', 'supplier', 'supplier_display',
+            'total_quantity_sold', 'total_revenue', 'total_cost', 'total_margin',
+            'products_count', 'transactions_count', 'unique_products_sold',
+            'average_margin_percentage', 'turnover_rate'
+        ]
+
 
 class SalesSummarySerializer(serializers.ModelSerializer):
     payment_method_display = serializers.CharField(

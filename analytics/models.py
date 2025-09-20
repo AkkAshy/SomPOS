@@ -409,3 +409,92 @@ class CategoryAnalytics(StoreOwnedModel):
         """Рассчитывает производные метрики"""
         if self.transactions_count > 0:
             self.average_transaction_amount = self.total_revenue / self.transactions_count
+
+
+
+class SupplierAnalytics(StoreOwnedModel):
+    """
+    Аналитика по поставщикам — кто приносит прибыль, а кто убытки
+    """
+    date = models.DateField(verbose_name=_("Дата"))
+    supplier = models.CharField(
+        max_length=255,  # Как в ProductBatch
+        verbose_name=_("Поставщик"),
+        db_index=True  # Для быстрых поисков
+    )
+    
+    # Статистика продаж (из StockHistory/Transactions)
+    total_quantity_sold = models.DecimalField(
+        max_digits=15,
+        decimal_places=3,
+        default=0,
+        verbose_name="Общее количество проданного"
+    )
+    total_revenue = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        verbose_name="Общая выручка"
+    )
+    total_cost = models.DecimalField(  # Себестоимость проданного
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        verbose_name="Общая себестоимость"
+    )
+    total_margin = models.DecimalField(  # Маржа = revenue - cost
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        verbose_name="Общая маржа"
+    )
+    products_count = models.PositiveIntegerField(
+        default=0,
+        verbose_name="Количество товаров от поставщика"
+    )
+    transactions_count = models.PositiveIntegerField(
+        default=0,
+        verbose_name="Количество транзакций"
+    )
+    unique_products_sold = models.PositiveIntegerField(
+        default=0,
+        verbose_name="Уникальных товаров продано"
+    )
+    
+    # Средние показатели
+    average_margin_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name="Средняя маржа (%)"
+    )
+    turnover_rate = models.DecimalField(  # Оборачиваемость: sold / average_stock
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name="Коэффициент оборачиваемости"
+    )
+
+    objects = StoreOwnedManager()
+
+    class Meta:
+        verbose_name = _("Аналитика поставщиков")
+        verbose_name_plural = _("Аналитика поставщиков")
+        unique_together = ('store', 'date', 'supplier')
+        ordering = ['-date', 'supplier']
+        indexes = [
+            models.Index(fields=['supplier', 'date']),
+        ]
+
+    def __str__(self):
+        return f"{self.supplier} - {self.date} (Выручка: {self.total_revenue}, Маржа: {self.total_margin})"
+
+    def calculate_metrics(self):
+        """Рассчитывает производные метрики перед сохранением"""
+        if self.total_revenue > 0:
+            self.average_margin_percentage = (self.total_margin / self.total_revenue * 100)
+        if self.products_count > 0:  # Примерный turnover; адаптируй под реальный average_stock из Stock
+            average_stock = self.products_count  # Замени на реальный расчёт, если есть данные
+            self.turnover_rate = self.total_quantity_sold / average_stock if average_stock else 0

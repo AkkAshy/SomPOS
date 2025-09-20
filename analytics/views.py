@@ -6,13 +6,15 @@ from rest_framework.filters import OrderingFilter
 from django.utils import timezone
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
-from .models import SalesSummary, ProductAnalytics, CustomerAnalytics
-from .serializers import SalesSummarySerializer, ProductAnalyticsSerializer, CustomerAnalyticsSerializer
+from .models import SalesSummary, ProductAnalytics, CustomerAnalytics, SupplierAnalytics
+from .serializers import SalesSummarySerializer, ProductAnalyticsSerializer, CustomerAnalyticsSerializer, SupplierAnalyticsSerializer
 from django.utils.translation import gettext_lazy as _
-from django.db.models import Sum, Count
+from django.db.models import Sum, Count, F, Avg, Q
 from datetime import datetime, timedelta
 from rest_framework.views import APIView
 from decimal import Decimal
+from rest_framework.exceptions import PermissionDenied
+
 
 from sales.serializers import FilteredTransactionHistorySerializer
 from sales.models import Transaction, TransactionHistory
@@ -30,7 +32,109 @@ class AnalyticsPermission(permissions.BasePermission):
     def has_permission(self, request, view):
         return request.user.groups.filter(name__in=['admin', 'manager', 'owner']).exists()
 
+class SupplierAnalyticsViewSet(StoreViewSetMixin, viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet для аналитики поставщиков — чей товар улетает, а чей пылится.
+    """
+    queryset = SupplierAnalytics.objects.all()  # Если persistent; иначе переопредели get_queryset для агрегации
+    serializer_class = SupplierAnalyticsSerializer
+    permission_classes = [permissions.IsAuthenticated, AnalyticsPermission]
+    filter_backends = [DjangoFilterBackend, OrderingFilter]
+    filterset_fields = ['supplier', 'date']
+    ordering_fields = ['date', 'total_revenue', 'total_margin']
+    ordering = ['-date']
 
+    def get_queryset(self):
+        current_store = self.get_current_store()
+        if not current_store:
+            raise PermissionDenied("Магазин не определен")
+        return super().get_queryset().filter(store=current_store)
+
+    @swagger_auto_schema(
+        operation_description="Получить топ поставщиков по выручке/марже",
+        manual_parameters=[
+            openapi.Parameter('limit', openapi.IN_QUERY, type=openapi.TYPE_INTEGER, default=10),
+            openapi.Parameter('start_date', openapi.IN_QUERY, type=openapi.TYPE_STRING, format='date'),
+            openapi.Parameter('end_date', openapi.IN_QUERY, type=openapi.TYPE_STRING, format='date'),
+            openapi.Parameter('metric', openapi.IN_QUERY, type=openapi.TYPE_STRING, enum=['revenue', 'margin', 'turnover'], default='revenue')
+        ]
+    )
+    @action(detail=False, methods=['get'])
+    def top_suppliers(self, request):
+        current_store = self.get_current_store()
+        if not current_store:
+            return Response({'error': 'Магазин не определен'}, status=400)
+
+        limit = int(request.query_params.get('limit', 10))
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date', timezone.now().date())
+        metric = request.query_params.get('metric', 'revenue')  # Сортировка по revenue/margin/turnover
+
+        # Если модель не persistent, агрегируем из StockHistory
+        from inventory.models import StockHistory  # Импорт здесь, чтобы избежать цикла
+        sales_qs = StockHistory.objects.filter(
+            store=current_store,
+            operation_type='SALE',
+            batch__isnull=False
+        )
+        if start_date:
+            sales_qs = sales_qs.filter(date_only__gte=start_date)
+        if end_date:
+            sales_qs = sales_qs.filter(date_only__lte=end_date)
+
+        supplier_data = sales_qs.values('batch__supplier').annotate(
+            total_sold=Sum(F('quantity_change') * -1),
+            total_revenue=Sum(F('quantity_change') * -1 * F('sale_price_at_time')),
+            total_cost=Sum(F('quantity_change') * -1 * F('purchase_price_at_time')),
+            total_margin=Sum(
+                (F('quantity_change') * -1 * F('sale_price_at_time')) -
+                (F('quantity_change') * -1 * F('purchase_price_at_time'))
+            ),
+            unique_products=Count('product', distinct=True),
+            transactions_count=Count('id'),
+            avg_margin_pct=Avg(
+                ((F('sale_price_at_time') - F('purchase_price_at_time')) / F('sale_price_at_time')) * 100,
+                filter=Q(sale_price_at_time__gt=0)
+            ),
+            turnover_rate=Sum(F('quantity_change') * -1) / Avg('product__stock__quantity')  # Адаптируй
+        ).order_by(f'-total_{metric}')[:limit]  # Динамическая сортировка
+
+        # Инсайты
+        insights = self._get_supplier_insights(supplier_data)
+
+        return Response({
+            'store': {'id': str(current_store.id), 'name': current_store.name},
+            'top_suppliers': list(supplier_data),
+            'insights': insights,
+            'period': {'start_date': start_date, 'end_date': end_date},
+            'metric': metric,
+            'limit': limit
+        })
+
+    def _get_supplier_insights(self, data):
+        # Аналогично моему предыдущему совету: генерируем рекомендации
+        if not data:
+            return [{'type': 'no_data', 'title': 'Нет данных', 'description': 'Проверьте продажи и партии.'}]
+        
+        insights = []
+        top = data[0]
+        insights.append({
+            'type': 'top_supplier',
+            'title': f'Лучший: {top["batch__supplier"]}',
+            'description': f'Выручка {top["total_revenue"]:,}, маржа {top["total_margin"]:,}.',
+            'action': 'Увеличьте объёмы.'
+        })
+        
+        low_margin = [s for s in data if s['avg_margin_pct'] < 20]
+        if low_margin:
+            insights.append({
+                'type': 'low_margin',
+                'title': 'Проблемные по марже',
+                'description': f'{len(low_margin)} с маржей <20%.',
+                'action': 'Переговоры или замена.'
+            })
+        
+        return insights
 
 class SalesAnalyticsViewSet(StoreViewSetMixin, viewsets.ReadOnlyModelViewSet):  # ← ДОБАВЛЯЕМ МИКСИН
     """
